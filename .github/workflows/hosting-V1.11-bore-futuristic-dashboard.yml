@@ -1,4 +1,4 @@
-name: Minecraft Hosting - Ultimate Edition V1.11 (Bore TCP + Futuristic Dashboard)
+name: Minecraft Hosting - Ultimate Edition V1.12 (Playit + Rebrushed Futuristic Dashboard)
 on:
   workflow_dispatch:
     inputs:
@@ -57,53 +57,74 @@ jobs:
         python -m venv .venv
         .venv/bin/pip install --upgrade pip
         .venv/bin/pip install flask psutil requests
-    - name: Install and start automatic Minecraft TCP tunnel (Bore)
+    - name: Install and start Playit agent (interactive claim, no GitHub secrets)
       shell: bash
       run: |
         set -euo pipefail
         mkdir -p logs runtime
-        BORE_VERSION="v0.6.0"
-        BORE_URL="https://github.com/ekzhang/bore/releases/download/${BORE_VERSION}/bore-${BORE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-        curl -fL --retry 3 --retry-delay 2 "$BORE_URL" -o /tmp/bore.tar.gz
-        echo "e484d1e3acba77169b773f31a5bfb34192d4b660f44a094a658a2522cd2270f7  /tmp/bore.tar.gz" | sha256sum --check
-        mkdir -p /tmp/bore-unpack
-        tar -xzf /tmp/bore.tar.gz -C /tmp/bore-unpack
-        BORE_BIN="$(find /tmp/bore-unpack -type f -name bore -print -quit)"
-        if [ -z "$BORE_BIN" ]; then
-          echo "The official Bore release did not contain the expected executable."
-          find /tmp/bore-unpack -maxdepth 3 -type f -print
-          exit 1
-        fi
-        install -m 0755 "$BORE_BIN" ./bore
-        ./bore --version
+        PLAYIT_VERSION="v2.0.2"
+        PLAYIT_URL="https://github.com/playit-cloud/playit-agent/releases/download/${PLAYIT_VERSION}/playit-linux-amd64"
+        echo "Official Playit agent: ${PLAYIT_VERSION}"
+        echo "Download URL: ${PLAYIT_URL}"
+        curl -fL --retry 3 --retry-delay 2 "${PLAYIT_URL}" -o ./playit
+        echo "9d27a8dbb4d2d8a7107fcabfa33028c789a30a64c97a36447fe4afb94e08dde9  ./playit" | sha256sum --check
+        chmod 0755 ./playit
+        ./playit --version || true
 
-        # Expose the Minecraft Java TCP port through the public Bore relay.
-        nohup ./bore local 25565 --to bore.pub > logs/bore.log 2>&1 &
-        echo $! > runtime/bore.pid
+        # No account token or GitHub Actions secret is supplied. A fresh runner
+        # may request a new one-time claim approval on every workflow run.
+        nohup ./playit > logs/playit.log 2>&1 &
+        echo $! > runtime/playit.pid
 
-        ADDRESS=""
-        for i in $(seq 1 60); do
-          ADDRESS="$(grep -Eo 'bore\.pub:[0-9]+' logs/bore.log | tail -n 1 || true)"
-          if [ -n "$ADDRESS" ]; then break; fi
-          if ! kill -0 "$(cat runtime/bore.pid)" 2>/dev/null; then
-            echo "Bore exited before publishing the Minecraft address."
-            cat logs/bore.log
+        CLAIM_URL=""
+        for i in $(seq 1 180); do
+          CLAIM_URL="$(grep -Eo 'https://playit\.gg/claim/[A-Za-z0-9_-]+' logs/playit.log | tail -n 1 || true)"
+          if [ -n "${CLAIM_URL}" ]; then break; fi
+          if ! kill -0 "$(cat runtime/playit.pid)" 2>/dev/null; then
+            echo "Playit agent exited before presenting its claim link."
+            cat logs/playit.log
             exit 1
           fi
           sleep 2
         done
-        if [ -z "$ADDRESS" ]; then
-          echo "Bore did not publish a TCP address within 120 seconds."
-          cat logs/bore.log
+
+        if [ -n "${CLAIM_URL}" ]; then
+          echo "============================================================"
+          echo "PLAYIT APPROVAL REQUIRED"
+          echo "Open this link and approve the new agent:"
+          echo "${CLAIM_URL}"
+          echo "============================================================"
+        else
+          echo "No claim URL was detected in the first six minutes."
+          echo "Playit output follows:"
+          cat logs/playit.log
           exit 1
         fi
 
-        echo "============================================================"
-        echo "MINECRAFT JAVA SERVER ADDRESS: $ADDRESS"
-        echo "LOCAL TARGET: 127.0.0.1:25565"
-        echo "TUNNEL: Bore TCP relay (no account, token, or manual claim)"
-        echo "The public port is temporary and changes on each workflow run."
-        echo "============================================================"
+        echo "Waiting for Playit to finish association and publish the Minecraft tunnel..."
+        PUBLIC_ADDRESS=""
+        for i in $(seq 1 300); do
+          PUBLIC_ADDRESS="$(grep -Eio '[A-Za-z0-9.-]+\.(joinmc\.link|ply\.gg)(:[0-9]+)?' logs/playit.log | tail -n 1 || true)"
+          if [ -n "${PUBLIC_ADDRESS}" ]; then break; fi
+          if ! kill -0 "$(cat runtime/playit.pid)" 2>/dev/null; then
+            echo "Playit agent exited during association."
+            cat logs/playit.log
+            exit 1
+          fi
+          sleep 2
+        done
+
+        if [ -n "${PUBLIC_ADDRESS}" ]; then
+          echo "============================================================"
+          echo "MINECRAFT JAVA SERVER ADDRESS: ${PUBLIC_ADDRESS}"
+          echo "LOCAL TARGET: 127.0.0.1:25565"
+          echo "TUNNEL: Playit TCP — public address is managed by your Playit account."
+          echo "============================================================"
+        else
+          echo "Playit agent is still running, but no Minecraft public address was detected in its log output."
+          echo "Check the Playit agent logs below; the address may be shown in a different format."
+          cat logs/playit.log
+        fi
     - name: Restore directories
       run: |
         mkdir -p server-data backups logs runtime
@@ -1328,13 +1349,97 @@ jobs:
         if [ -f runtime/cloudflared.pid ]; then
           kill "$(cat runtime/cloudflared.pid)" 2>/dev/null || true
         fi
-        if [ -f runtime/bore.pid ]; then
-          kill "$(cat runtime/bore.pid)" 2>/dev/null || true
+        if [ -f runtime/playit.pid ]; then
+          kill "$(cat runtime/playit.pid)" 2>/dev/null || true
         fi
         if [ -f runtime/dashboard.pid ]; then
           kill "$(cat runtime/dashboard.pid)" 2>/dev/null || true
         fi
         pkill -f 'cloudflared tunnel' 2>/dev/null || true
+        pkill -f '^./playit
+        pkill -f 'python app.py' 2>/dev/null || true
+    - name: FULL SERVER PURGE
+      if: always()
+      shell: bash
+      run: |
+        if [ ! -f runtime/purge.flag ]; then
+          echo "performed=false" >> "$GITHUB_OUTPUT"
+          echo "Purge not requested."
+          exit 0
+        fi
+
+        echo "performed=true" >> "$GITHUB_OUTPUT"
+        touch "$RUNNER_TEMP/minecraft-hosting-full-purge"
+        python - <<'PY'
+        from pathlib import Path
+        import shutil
+        root = Path.cwd()
+        # Preserve Git metadata, the complete .github folder, README files and LICENSE files.
+        for item in list(root.iterdir()):
+            upper = item.name.upper()
+            if item.name in ('.git', '.github'):
+                continue
+            if upper.startswith('README') or upper == 'LICENSE' or upper.startswith('LICENSE.'):
+                continue
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item)
+            else:
+                item.unlink(missing_ok=True)
+        PY
+
+        git config user.name "Minecraft Hosting"
+        git config user.email "minecraft-hosting@users.noreply.github.com"
+        git add -A
+        if ! git diff --cached --quiet; then
+          git commit -m "FULL SERVER PURGE - preserve README, LICENSE and .github"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+        else
+          echo "Repository already contains only workflow files."
+        fi
+      id: full_purge
+    - name: Persist server data
+      if: always() && !cancelled()
+      shell: bash
+      run: |
+        if [ -f "$RUNNER_TEMP/minecraft-hosting-full-purge" ]; then
+          echo "Full purge performed; skipping normal persistence."
+          exit 0
+        fi
+        if [ -f runtime/purge.flag ]; then
+          echo "Purge performed; skipping normal persistence."
+          exit 0
+        fi
+        git config user.name "Minecraft Hosting"
+        git config user.email "minecraft-hosting@users.noreply.github.com"
+        # Add only paths that exist; a fresh run or a purge may leave them absent.
+        for path in server-data backups; do
+          if [ -e "$path" ]; then
+            git add -A -- "$path"
+          fi
+        done
+        if [ -d runtime ]; then
+          git add -u -- runtime 2>/dev/null || true
+        fi
+        [ ! -f runtime/users.json ] || git add -f runtime/users.json
+        [ ! -f runtime/server.json ] || git add -f runtime/server.json
+        if ! git diff --cached --quiet; then
+          git commit -m "Save Minecraft hosting session data"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+        else
+          echo "No session data changes to persist."
+        fi
+    - name: Export session files
+      if: always() && !cancelled() && steps.full_purge.outputs.performed != 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: minecraft-hosting-session
+        path: |
+          server-data/
+          backups/
+          logs/
+        retention-days: 7
+        if-no-files-found: ignore
+ 2>/dev/null || true
         pkill -f 'python app.py' 2>/dev/null || true
     - name: FULL SERVER PURGE
       if: always()
