@@ -1378,3 +1378,8 @@ Whether you are creating a small Survival world with friends, building a modded 
 Have fun, explore, build, and create amazing Minecraft experiences!
 
 **Happy Crafting!** 
+
+
+## UMN Gateway security model
+
+Forks call the central V1.19 reusable workflow and authenticate to the temporary UMN Gateway using GitHub Actions OIDC. The Gateway accepts only tokens whose `job_workflow_ref` identifies the approved central reusable workflow. The GitHub App private key stays in the private Admin repository; no fork needs an App secret or installation. Existing Tailscale OIDC variables are still required for private instance registration and `umn.internal` DNS access. See the Admin repository's `docs/REUSABLE-WORKFLOW.md` for setup.
