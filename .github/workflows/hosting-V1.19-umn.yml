@@ -1,28 +1,5 @@
 name: Minecraft Hosting - Ultimate Edition V1.19 (UMN Network + Bore + Colorful Dashboard)
 'on':
-  workflow_dispatch:
-    inputs:
-      session_minutes:
-        description: Durata sesiunii
-        type: choice
-        required: true
-        default: '300'
-        options:
-        - '60'
-        - '120'
-        - '180'
-        - '240'
-        - '300'
-      java_version:
-        description: Java
-        type: choice
-        required: true
-        default: '21'
-        options:
-        - '8'
-        - '17'
-        - '21'
-        - '25'
   workflow_call:
     inputs:
       session_minutes:
@@ -33,14 +10,6 @@ name: Minecraft Hosting - Ultimate Edition V1.19 (UMN Network + Bore + Colorful 
         type: string
         required: false
         default: '21'
-      tailscale_client_id:
-        type: string
-        required: false
-        default: ''
-      tailscale_audience:
-        type: string
-        required: false
-        default: ''
 permissions:
   contents: write
   id-token: write
@@ -184,22 +153,62 @@ jobs:
         echo $! > runtime/umn-gateway-agent.pid
         echo "UMN Gateway authentication agent is running in the background. Minecraft setup will continue."
 
-    - name: UMN - Connect this instance to the private Tailscale network
-      if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
-      uses: tailscale/github-action@v4
-      with:
-        oauth-client-id: ${{ inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID }}
-        audience: ${{ inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE }}
-        tags: tag:umn-instance
-        version: latest
-    - name: UMN - Explain disabled private registration
-      if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) == '' || (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) == '' }}
+    - name: UMN - Load centrally published Tailscale OIDC configuration
+      id: umn-tailscale-config
       shell: bash
       run: |
-        echo "::warning::UMN Tailscale OIDC is not configured. Minecraft will continue, but this run cannot register with UMN. See the Admin repository TAILSCALE-SETUP.md."
+        set -euo pipefail
+        mkdir -p runtime
+        DISCOVERY_URL="https://raw.githubusercontent.com/Iustin-dev2014/Minecraft-Hosting/main/umn-gateway.json"
+        CONFIGURED=false
+        for attempt in $(seq 1 60); do
+          if curl -fsS --max-time 10 "${DISCOVERY_URL}?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" -o runtime/umn-gateway-discovery.json 2>/dev/null; then
+            if TS_VALUES="$(python3 - runtime/umn-gateway-discovery.json <<'PY'
+        import json, re, sys
+        data = json.load(open(sys.argv[1], encoding="utf-8"))
+        config = data.get("tailscale", {})
+        client_id = config.get("client_id", "")
+        audience = config.get("audience", "")
+        if not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", client_id):
+            raise SystemExit(1)
+        if not isinstance(audience, str) or audience != f"api.tailscale.com/{client_id}":
+            raise SystemExit(1)
+        print(client_id)
+        print(audience)
+        PY
+            )"; then
+              CLIENT_ID="$(printf '%s\n' "$TS_VALUES" | sed -n '1p')"
+              AUDIENCE="$(printf '%s\n' "$TS_VALUES" | sed -n '2p')"
+              if [ -n "$CLIENT_ID" ] && [ -n "$AUDIENCE" ]; then
+                {
+                  echo "client_id=$CLIENT_ID"
+                  echo "audience=$AUDIENCE"
+                  echo "configured=true"
+                } >> "$GITHUB_OUTPUT"
+                CONFIGURED=true
+                echo "UMN Tailscale federation configuration loaded from the central public discovery document."
+                break
+              fi
+            fi
+          fi
+          echo "Waiting for the central UMN Tailscale configuration to be published (attempt $attempt/60)."
+          sleep 2
+        done
+        if [ "$CONFIGURED" != "true" ]; then
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Central UMN Tailscale OIDC configuration is not published yet. Minecraft will continue, but this run cannot join the UMN private network or register."
+        fi
 
+    - name: UMN - Connect this instance to the private Tailscale network
+      if: ${{ steps.umn-tailscale-config.outputs.configured == 'true' }}
+      uses: tailscale/github-action@v4
+      with:
+        oauth-client-id: ${{ steps.umn-tailscale-config.outputs.client_id }}
+        audience: ${{ steps.umn-tailscale-config.outputs.audience }}
+        tags: tag:umn-instance
+        version: latest
     - name: UMN - Register instance and keep background heartbeat active
-      if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
+      if: ${{ steps.umn-tailscale-config.outputs.configured == 'true' }}
       shell: bash
       run: |
         set -euo pipefail
