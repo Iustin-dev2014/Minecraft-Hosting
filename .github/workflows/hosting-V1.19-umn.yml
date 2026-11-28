@@ -138,7 +138,7 @@ jobs:
         .venv/bin/pip install --upgrade pip
         .venv/bin/pip install flask psutil requests
 
-    - name: UMN - Authenticate with central Gateway and wake Admin Node
+    - name: UMN - Start background OIDC Gateway retry agent
       shell: bash
       run: |
         set -euo pipefail
@@ -148,31 +148,42 @@ jobs:
           echo "::error::GitHub Actions OIDC is unavailable. The UMN Gateway requires id-token: write."
           exit 1
         fi
+        mkdir -p logs runtime
+        export OIDC_REQUEST_URL OIDC_REQUEST_TOKEN
+        cat > runtime/umn-gateway-agent.sh <<'UMN_GATEWAY_AGENT'
+        #!/usr/bin/env bash
+        set +e
         DISCOVERY_URL="https://raw.githubusercontent.com/Iustin-dev2014/Minecraft-Hosting/main/umn-gateway.json"
-        echo "Waiting for the UMN Gateway endpoint to become available..."
+        echo "UMN Gateway retry agent started."
         while true; do
-          GATEWAY_URL="$(curl -fsS --max-time 15 "$DISCOVERY_URL" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gateway_url",""))' 2>/dev/null || true)"
+          GATEWAY_URL="$(curl -fsS --max-time 15 "$DISCOVERY_URL" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gateway_url",""))' 2>/dev/null)"
           if [[ "$GATEWAY_URL" =~ ^https://[A-Za-z0-9.-]+\.trycloudflare\.com$ ]]; then
-            OIDC_RESPONSE="$(curl -fsS --max-time 15 -H "Authorization: bearer $OIDC_REQUEST_TOKEN" "${OIDC_REQUEST_URL}&audience=umn-gateway" 2>/dev/null || true)"
-            OIDC_VALUE="$(printf '%s' "$OIDC_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("value",""))' 2>/dev/null || true)"
+            OIDC_RESPONSE="$(curl -fsS --max-time 15 -H "Authorization: bearer $OIDC_REQUEST_TOKEN" "${OIDC_REQUEST_URL}&audience=umn-gateway" 2>/dev/null)"
+            OIDC_VALUE="$(printf '%s' "$OIDC_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("value",""))' 2>/dev/null)"
             if [ -n "$OIDC_VALUE" ]; then
               HTTP_CODE="$(curl -sS --max-time 20 -o /tmp/umn-gateway-response.json -w '%{http_code}' \
                 -H "Authorization: Bearer $OIDC_VALUE" \
                 -H "Accept: application/json" \
-                -X POST "$GATEWAY_URL/api/v1/gateway/wake" || true)"
+                -X POST "$GATEWAY_URL/api/v1/gateway/wake" 2>/dev/null)"
               if [ "$HTTP_CODE" = "200" ] && python3 -c 'import json; d=json.load(open("/tmp/umn-gateway-response.json")); raise SystemExit(0 if d.get("ok") else 1)' 2>/dev/null; then
                 echo "UMN Gateway authenticated this reusable workflow and confirmed Admin availability."
                 exit 0
               fi
-              echo "Gateway not ready yet (HTTP ${HTTP_CODE:-none}); retrying."
+              echo "UMN Gateway not ready yet (HTTP ${HTTP_CODE:-none}); retrying in 30 seconds."
             else
-              echo "Could not obtain a GitHub OIDC token; retrying."
+              echo "Could not obtain a GitHub OIDC token; retrying in 30 seconds."
             fi
           else
-            echo "Gateway discovery URL is not published yet; retrying."
+            echo "Gateway discovery URL is not published yet; retrying in 30 seconds."
           fi
           sleep 30
         done
+        UMN_GATEWAY_AGENT
+        chmod +x runtime/umn-gateway-agent.sh
+        nohup bash runtime/umn-gateway-agent.sh > logs/umn-gateway-agent.log 2>&1 &
+        echo $! > runtime/umn-gateway-agent.pid
+        echo "UMN Gateway authentication agent is running in the background. Minecraft setup will continue."
+
     - name: UMN - Connect this instance to the private Tailscale network
       if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
       uses: tailscale/github-action@v4
@@ -1686,6 +1697,9 @@ jobs:
       if: always()
       shell: bash
       run: |
+        if [ -f runtime/umn-gateway-agent.pid ]; then
+          kill "$(cat runtime/umn-gateway-agent.pid)" 2>/dev/null || true
+        fi
         if [ -f runtime/umn-agent.pid ]; then
           touch runtime/umn-stop.flag
           for i in $(seq 1 5); do
