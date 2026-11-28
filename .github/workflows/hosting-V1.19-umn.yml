@@ -140,11 +140,10 @@ jobs:
 
     - name: UMN - Authenticate with central Gateway and wake Admin Node
       shell: bash
-      env:
-        OIDC_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-        OIDC_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
       run: |
         set -euo pipefail
+        OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+        OIDC_REQUEST_TOKEN="${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
         if [ -z "${OIDC_REQUEST_URL:-}" ] || [ -z "${OIDC_REQUEST_TOKEN:-}" ]; then
           echo "::error::GitHub Actions OIDC is unavailable. The UMN Gateway requires id-token: write."
           exit 1
