@@ -1,0 +1,1667 @@
+name: Minecraft Hosting - Ultimate Edition V1.19 (UMN Network + Bore + Colorful Dashboard)
+'on':
+  workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: Durata sesiunii
+        type: choice
+        required: true
+        default: '300'
+        options:
+        - '60'
+        - '120'
+        - '180'
+        - '240'
+        - '300'
+      java_version:
+        description: Java
+        type: choice
+        required: true
+        default: '21'
+        options:
+        - '8'
+        - '17'
+        - '21'
+        - '25'
+  workflow_call:
+    inputs:
+      session_minutes:
+        type: string
+        required: false
+        default: '300'
+      java_version:
+        type: string
+        required: false
+        default: '21'
+      tailscale_client_id:
+        type: string
+        required: false
+        default: ''
+      tailscale_audience:
+        type: string
+        required: false
+        default: ''
+permissions:
+  contents: write
+  id-token: write
+concurrency:
+  group: minecraft-hosting
+  cancel-in-progress: false
+jobs:
+  hosting:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      SESSION_MINUTES: ${{ inputs.session_minutes }}
+      SERVER_ROOT: server-data
+      PYTHONUNBUFFERED: '1'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: UMN - Identify GitHub account, repository and instance
+      shell: bash
+      env:
+        GH_TOKEN: \${{ github.token }}
+        UMN_ACCOUNT_LOGIN: \${{ github.repository_owner }}
+        UMN_ACCOUNT_ID: \${{ github.repository_owner_id }}
+        UMN_ACTOR_LOGIN: \${{ github.actor }}
+        UMN_ACTOR_ID: \${{ github.actor_id }}
+        UMN_REPOSITORY: \${{ github.repository }}
+        UMN_REPOSITORY_ID: \${{ github.repository_id }}
+        UMN_WORKFLOW: \${{ github.workflow }}
+        UMN_WORKFLOW_REF: \${{ github.workflow_ref }}
+        UMN_REF: \${{ github.ref }}
+        UMN_SHA: \${{ github.sha }}
+        UMN_EVENT_NAME: \${{ github.event_name }}
+        UMN_JAVA_VERSION: \${{ inputs.java_version }}
+      run: |
+        set -euo pipefail
+        mkdir -p logs runtime
+        if [ -z "$UMN_ACCOUNT_ID" ]; then
+          UMN_ACCOUNT_ID="$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/users/$UMN_ACCOUNT_LOGIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+        fi
+        UMN_INSTANCE_ID="umn-$UMN_REPOSITORY_ID-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        {
+          echo "UMN_ACCOUNT_ID=$UMN_ACCOUNT_ID"
+          echo "UMN_INSTANCE_ID=$UMN_INSTANCE_ID"
+          echo "UMN_ACCOUNT_LOGIN=$UMN_ACCOUNT_LOGIN"
+          echo "UMN_ACTOR_LOGIN=$UMN_ACTOR_LOGIN"
+          echo "UMN_ACTOR_ID=$UMN_ACTOR_ID"
+          echo "UMN_REPOSITORY=$UMN_REPOSITORY"
+          echo "UMN_REPOSITORY_ID=$UMN_REPOSITORY_ID"
+          echo "UMN_WORKFLOW=$UMN_WORKFLOW"
+          echo "UMN_WORKFLOW_REF=$UMN_WORKFLOW_REF"
+          echo "UMN_REF=$UMN_REF"
+          echo "UMN_SHA=$UMN_SHA"
+          echo "UMN_EVENT_NAME=$UMN_EVENT_NAME"
+          echo "UMN_JAVA_VERSION=$UMN_JAVA_VERSION"
+        } >> "$GITHUB_ENV"
+        echo "============================================================"
+        echo "UMN NETWORK INSTANCE IDENTIFICATION"
+        echo "GitHub account       : $UMN_ACCOUNT_LOGIN"
+        echo "GitHub account ID    : $UMN_ACCOUNT_ID"
+        echo "Workflow actor       : $UMN_ACTOR_LOGIN"
+        echo "Workflow actor ID    : $UMN_ACTOR_ID"
+        echo "Repository           : $UMN_REPOSITORY"
+        echo "Repository ID        : $UMN_REPOSITORY_ID"
+        echo "Instance ID          : $UMN_INSTANCE_ID"
+        echo "Workflow             : $UMN_WORKFLOW"
+        echo "Workflow run ID      : $GITHUB_RUN_ID"
+        echo "Workflow attempt     : $GITHUB_RUN_ATTEMPT"
+        echo "Ref / commit         : $UMN_REF / $UMN_SHA"
+        echo "Trigger event        : $UMN_EVENT_NAME"
+        echo "Java                 : $UMN_JAVA_VERSION"
+        echo "============================================================"
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java_version }}
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl wget jq unzip zip git gnupg
+        python -m venv .venv
+        .venv/bin/pip install --upgrade pip
+        .venv/bin/pip install flask psutil requests
+    - name: UMN - Connect this instance to the private Tailscale network
+      if: \${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
+      uses: tailscale/github-action@v4
+      with:
+        oauth-client-id: \${{ inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID }}
+        audience: \${{ inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE }}
+        tags: tag:umn-instance
+        version: latest
+    - name: UMN - Explain disabled private registration
+      if: \${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) == '' || (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) == '' }}
+      shell: bash
+      run: |
+        echo "::warning::UMN Tailscale OIDC is not configured. Minecraft will continue, but this run cannot register with UMN. See the Admin repository TAILSCALE-SETUP.md."
+
+    - name: Install and start automatic Minecraft TCP tunnel (Bore)
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p logs runtime
+        BORE_VERSION="v0.6.0"
+        BORE_URL="https://github.com/ekzhang/bore/releases/download/${BORE_VERSION}/bore-${BORE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+        curl -fL --retry 3 --retry-delay 2 "$BORE_URL" -o /tmp/bore.tar.gz
+        echo "e484d1e3acba77169b773f31a5bfb34192d4b660f44a094a658a2522cd2270f7  /tmp/bore.tar.gz" | sha256sum --check
+        mkdir -p /tmp/bore-unpack
+        tar -xzf /tmp/bore.tar.gz -C /tmp/bore-unpack
+        BORE_BIN="$(find /tmp/bore-unpack -type f -name bore -print -quit)"
+        if [ -z "$BORE_BIN" ]; then
+          echo "The official Bore release did not contain the expected executable."
+          find /tmp/bore-unpack -maxdepth 3 -type f -print
+          exit 1
+        fi
+        install -m 0755 "$BORE_BIN" ./bore
+        ./bore --version
+
+        # Expose the Minecraft Java TCP port through the public Bore relay.
+        nohup ./bore local 25565 --to bore.pub > logs/bore.log 2>&1 &
+        echo $! > runtime/bore.pid
+
+        ADDRESS=""
+        for i in $(seq 1 60); do
+          ADDRESS="$(grep -Eo 'bore\.pub:[0-9]+' logs/bore.log | tail -n 1 || true)"
+          if [ -n "$ADDRESS" ]; then break; fi
+          if ! kill -0 "$(cat runtime/bore.pid)" 2>/dev/null; then
+            echo "Bore exited before publishing the Minecraft address."
+            cat logs/bore.log
+            exit 1
+          fi
+          sleep 2
+        done
+        if [ -z "$ADDRESS" ]; then
+          echo "Bore did not publish a TCP address within 120 seconds."
+          cat logs/bore.log
+          exit 1
+        fi
+
+        echo "============================================================"
+        echo "MINECRAFT JAVA SERVER ADDRESS: $ADDRESS"
+        echo "MINECRAFT_ADDRESS=$ADDRESS" >> "$GITHUB_ENV"
+        printf "%s\n" "$ADDRESS" > runtime/minecraft-address.txt
+        echo "LOCAL TARGET: 127.0.0.1:25565"
+        echo "TUNNEL: Bore TCP relay (no account, token, or manual claim)"
+        echo "The public port is temporary and changes on each workflow run."
+        echo "============================================================"
+    - name: UMN - Register instance and keep background heartbeat active
+      if: \${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
+      shell: bash
+      env:
+        UMN_ACCOUNT_LOGIN: \${{ env.UMN_ACCOUNT_LOGIN }}
+        UMN_ACCOUNT_ID: \${{ env.UMN_ACCOUNT_ID }}
+        UMN_ACTOR_LOGIN: \${{ env.UMN_ACTOR_LOGIN }}
+        UMN_ACTOR_ID: \${{ env.UMN_ACTOR_ID }}
+        UMN_REPOSITORY: \${{ env.UMN_REPOSITORY }}
+        UMN_REPOSITORY_ID: \${{ env.UMN_REPOSITORY_ID }}
+        UMN_INSTANCE_ID: \${{ env.UMN_INSTANCE_ID }}
+        UMN_WORKFLOW: \${{ env.UMN_WORKFLOW }}
+        UMN_WORKFLOW_REF: \${{ env.UMN_WORKFLOW_REF }}
+        UMN_REF: \${{ env.UMN_REF }}
+        UMN_SHA: \${{ env.UMN_SHA }}
+        UMN_EVENT_NAME: \${{ env.UMN_EVENT_NAME }}
+        UMN_JAVA_VERSION: \${{ env.UMN_JAVA_VERSION }}
+      run: |
+        set -euo pipefail
+        rm -f runtime/umn-registered runtime/umn-stop.flag
+        tailscale set --hostname="umn-instance-$GITHUB_RUN_ID" || true
+        cat > runtime/umn-agent.sh <<'UMN_AGENT'
+        #!/usr/bin/env bash
+        set +e
+        REGISTERED=0
+        get_admin_ip() {
+          tailscale status --json 2>/dev/null | python3 -c '
+        import json,sys
+        try:
+            data=json.load(sys.stdin)
+            peers=data.get("Peer",{})
+            for peer in peers.values():
+                if str(peer.get("HostName","")).split(".")[0] == "umn-admin":
+                    ips=peer.get("TailscaleIPs",[])
+                    if ips:
+                        print(ips[0]); break
+        except Exception:
+            pass
+        ' 2>/dev/null
+        }
+        make_payload() {
+          UMN_TAILSCALE_IP="$1" UMN_INSTANCE_STATUS="$2" python3 - <<'PY'
+        import json, os
+        from pathlib import Path
+        config={}
+        try:
+            config=json.loads(Path("runtime/server.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        try:
+            address=Path("runtime/minecraft-address.txt").read_text(encoding="utf-8").strip()
+        except Exception:
+            address=""
+        print(json.dumps({
+            "instance_id": os.environ.get("UMN_INSTANCE_ID",""),
+            "account_login": os.environ.get("UMN_ACCOUNT_LOGIN",""),
+            "account_id": os.environ.get("UMN_ACCOUNT_ID",""),
+            "repository": os.environ.get("UMN_REPOSITORY",""),
+            "repository_id": os.environ.get("UMN_REPOSITORY_ID",""),
+            "run_id": os.environ.get("GITHUB_RUN_ID",""),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT",""),
+            "actor": os.environ.get("UMN_ACTOR_LOGIN",""),
+            "actor_id": os.environ.get("UMN_ACTOR_ID",""),
+            "workflow": os.environ.get("UMN_WORKFLOW",""),
+            "workflow_ref": os.environ.get("UMN_WORKFLOW_REF",""),
+            "ref": os.environ.get("UMN_REF",""),
+            "sha": os.environ.get("UMN_SHA",""),
+            "event_name": os.environ.get("UMN_EVENT_NAME",""),
+            "java_version": os.environ.get("UMN_JAVA_VERSION",""),
+            "tailscale_ip": os.environ.get("UMN_TAILSCALE_IP",""),
+            "minecraft_address": address,
+            "server_software": config.get("type",""),
+            "minecraft_version": config.get("version",""),
+            "status": os.environ.get("UMN_INSTANCE_STATUS","starting")
+        }))
+        PY
+        }
+        cleanup() {
+          if [ "$REGISTERED" -eq 1 ]; then
+            ADMIN_IP="$(get_admin_ip)"
+            TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n 1)"
+            if [ -n "$ADMIN_IP" ] && [ -n "$TAILSCALE_IP" ]; then
+              PAYLOAD="$(make_payload "$TAILSCALE_IP" "offline")"
+              curl -fsS --connect-timeout 2 --max-time 4 -X POST "http://$ADMIN_IP:8787/api/v1/deregister" -H "Content-Type: application/json" -d "$PAYLOAD" >/dev/null 2>&1 || true
+            fi
+          fi
+        }
+        trap cleanup EXIT
+        while [ ! -f runtime/umn-stop.flag ]; do
+          ADMIN_IP="$(get_admin_ip)"
+          TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n 1)"
+          if [ -n "$ADMIN_IP" ] && [ -n "$TAILSCALE_IP" ]; then
+            if command -v resolvectl >/dev/null 2>&1; then
+              resolvectl dns tailscale0 "$ADMIN_IP" >/dev/null 2>&1 || true
+              resolvectl domain tailscale0 "~umn.internal" >/dev/null 2>&1 || true
+            fi
+            STATUS="starting"
+            if [ -f runtime/server.pid ]; then
+              SERVER_PID="$(cat runtime/server.pid 2>/dev/null)"
+              if [[ "$SERVER_PID" =~ ^[0-9]+$ ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+                STATUS="online"
+              fi
+            fi
+            PAYLOAD="$(make_payload "$TAILSCALE_IP" "$STATUS")"
+            if [ "$REGISTERED" -eq 0 ]; then
+              if curl -fsS --connect-timeout 4 --max-time 8 -X POST "http://$ADMIN_IP:8787/api/v1/register" -H "Content-Type: application/json" -d "$PAYLOAD" > /tmp/umn-register-response.json 2>/dev/null; then
+                REGISTERED=1
+                touch runtime/umn-registered
+                echo "[UMN] Registration successful: $(cat /tmp/umn-register-response.json)"
+              else
+                echo "[UMN] Admin is not accepting registration yet; retrying in background."
+              fi
+            else
+              if ! curl -fsS --connect-timeout 4 --max-time 8 -X POST "http://$ADMIN_IP:8787/api/v1/heartbeat" -H "Content-Type: application/json" -d "$PAYLOAD" >/dev/null 2>&1; then
+                REGISTERED=0
+                rm -f runtime/umn-registered
+                echo "[UMN] Admin heartbeat failed; registration will be retried."
+              fi
+            fi
+          else
+            echo "[UMN] Admin peer not visible in Tailscale yet; retrying in background."
+          fi
+          sleep 20
+        done
+        UMN_AGENT
+        chmod 0755 runtime/umn-agent.sh
+        nohup bash runtime/umn-agent.sh >> logs/umn-agent.log 2>&1 &
+        echo $! > runtime/umn-agent.pid
+        for attempt in $(seq 1 12); do
+          if [ -f runtime/umn-registered ]; then
+            echo "============================================================"
+            echo "[UMN] REGISTRATION COMPLETED SUCCESSFULLY"
+            echo "[UMN] Instance: $UMN_INSTANCE_ID"
+            echo "[UMN] Admin acknowledged this instance."
+            echo "[UMN] Continuing Minecraft startup in 2 seconds..."
+            echo "============================================================"
+            sleep 2
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "============================================================"
+        echo "[UMN] ADMIN IS CURRENTLY OFFLINE OR UNREACHABLE"
+        echo "[UMN] Minecraft startup will continue normally."
+        echo "[UMN] Background registration retries are active (every 20 seconds)."
+        echo "============================================================"
+
+    - name: Restore directories
+      run: |
+        mkdir -p server-data backups logs runtime
+    - name: Generate credentials
+      shell: bash
+      run: |
+        echo "OWNER_PASSWORD=$(python -c 'import secrets; print(secrets.token_urlsafe(20))')" >> "$GITHUB_ENV"
+        echo "SESSION_SECRET=$(python -c 'import secrets; print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
+    - name: Generate application
+      shell: bash
+      run: |-
+        cat > app.py <<'PY'
+        import os, re, io, json, time, uuid, shutil, zipfile, queue, shlex
+        import hashlib, secrets, threading, subprocess, urllib.request, urllib.error, signal
+        import urllib.parse, xml.etree.ElementTree as ET
+        from pathlib import Path
+        from datetime import timedelta, datetime, timezone
+        from functools import wraps
+        import psutil
+        from flask import Flask, request, jsonify, session, render_template_string
+        from werkzeug.exceptions import HTTPException
+        BASE = Path(__file__).resolve().parent
+        ROOT = (BASE / 'server-data').resolve()
+        BACKUPS = BASE / 'backups'
+        LOGS = BASE / 'logs'
+        RUNTIME = BASE / 'runtime'
+        for p in (ROOT, BACKUPS, LOGS, RUNTIME):
+            p.mkdir(parents=True, exist_ok=True)
+        USERS = RUNTIME / 'users.json'
+        CONFIG = RUNTIME / 'server.json'
+        LOG = LOGS / 'minecraft.log'
+        app = Flask(__name__)
+        app.secret_key = os.environ['SESSION_SECRET']
+        app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=True, SESSION_COOKIE_SAMESITE='Lax', PERMANENT_SESSION_LIFETIME=timedelta(days=30), SESSION_REFRESH_EACH_REQUEST=True)
+        lock = threading.RLock()
+        process = None
+        server_psutil = None
+        server_ready_flag = False
+        started_at = None
+        run_log_start = 0
+        expected_stop = False
+        exit_processed = True
+        crash_event = None
+        last_tps_query = 0.0
+        tps_log_offset = 0
+        tps_value = None
+        tps_updated_at = 0.0
+        install_state = {'running': False, 'done': False, 'percent': 0, 'stage': 'Idle', 'error': None, 'result': None, 'logs': []}
+
+        def utc():
+            return datetime.now(timezone.utc).isoformat()
+
+        def read_json(path, default):
+            try:
+                return json.loads(path.read_text())
+            except Exception:
+                return default
+
+        def write_json(path, value):
+            tmp = path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(value, indent=2))
+            tmp.replace(path)
+
+        def hash_password(password):
+            salt = secrets.token_hex(16)
+            digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 260000).hex()
+            return salt + '$' + digest
+
+        def verify_password(password, stored):
+            try:
+                salt, digest = stored.split('$', 1)
+                candidate = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 260000).hex()
+                return secrets.compare_digest(candidate, digest)
+            except Exception:
+                return False
+        if not USERS.exists():
+            write_json(USERS, {'owner': {'password': hash_password(os.environ['OWNER_PASSWORD']), 'role': 'Owner'}})
+        cfg = read_json(CONFIG, {'installed': False, 'type': '', 'version': '', 'loader_version': '', 'memory': '4G', 'max_players': 20})
+
+        def safe_path(relative):
+            relative = str(relative or '').replace('\\', '/')
+            if relative.startswith('/') or '\x00' in relative:
+                raise ValueError('Invalid path')
+            candidate = ROOT / relative
+            current = ROOT
+            for part in Path(relative).parts:
+                if part in ('', '.', '..'):
+                    if part == '..':
+                        raise ValueError('Path traversal blocked')
+                    continue
+                current = current / part
+                if current.is_symlink():
+                    raise ValueError('Symbolic links are not allowed')
+            resolved = candidate.resolve()
+            if resolved != ROOT and ROOT not in resolved.parents:
+                raise ValueError('Path outside server directory')
+            return resolved
+
+        def logged_in(fn):
+
+            @wraps(fn)
+            def wrapper(*args, **kwargs):
+                if not session.get('username'):
+                    return (jsonify(error='Login required'), 401)
+                return fn(*args, **kwargs)
+            return wrapper
+
+        def roles(*allowed):
+
+            def decorator(fn):
+
+                @wraps(fn)
+                def wrapper(*args, **kwargs):
+                    if not session.get('username'):
+                        return (jsonify(error='Login required'), 401)
+                    users = read_json(USERS, {})
+                    role = users.get(session['username'], {}).get('role')
+                    if role not in allowed:
+                        return (jsonify(error='Permission denied'), 403)
+                    return fn(*args, **kwargs)
+                return wrapper
+            return decorator
+
+        @app.before_request
+        def csrf_guard():
+            if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+                if request.endpoint == 'login':
+                    return None
+                if not session.get('username'):
+                    return (jsonify(error='Login required'), 401)
+                token = request.headers.get('X-CSRF-Token', '')
+                expected = session.get('csrf', '')
+                if not expected or not secrets.compare_digest(token, expected):
+                    return (jsonify(error='Invalid CSRF token'), 403)
+
+        @app.errorhandler(HTTPException)
+        def http_error(error):
+            return (jsonify(error=error.description), error.code)
+
+        @app.errorhandler(Exception)
+        def unexpected_error(error):
+            app.logger.exception('Unhandled dashboard error')
+            return (jsonify(error=f'Internal server error: {type(error).__name__}: {error}'), 500)
+
+        def json_url(url, user_agent=None):
+            req = urllib.request.Request(url, headers={'User-Agent': user_agent or 'Minecraft-Hosting/1.8 (+https://github.com/)', 'Accept': 'application/json'})
+            try:
+                with urllib.request.urlopen(req, timeout=45) as response:
+                    raw = response.read()
+            except urllib.error.HTTPError as exc:
+                detail = exc.read(500).decode('utf-8', 'replace').strip()
+                raise RuntimeError(f'API HTTP {exc.code} for {url}: {detail or exc.reason}') from exc
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f'API connection failed for {url}: {exc.reason}') from exc
+            try:
+                return json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                sample = raw[:180].decode('utf-8', 'replace')
+                raise RuntimeError(f'API returned invalid JSON for {url}: {sample}') from exc
+
+        def install_log(message):
+            stamp = datetime.now().strftime('%H:%M:%S')
+            logs = install_state.setdefault('logs', [])
+            logs.append(f'[{stamp}] {str(message)}')
+            if len(logs) > 2000:
+                del logs[:-2000]
+
+        def install_update(percent, stage):
+            percent = max(0, min(99, int(percent)))
+            previous = install_state.get('stage')
+            install_state.update(percent=percent, stage=str(stage))
+            if stage != previous:
+                install_log(f'ETAPĂ: {stage}')
+
+        def download(url, destination, low=10, high=75, stage=None):
+            destination = Path(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_suffix(destination.suffix + '.part')
+            label = stage or f'Downloading {destination.name}'
+            install_log(f'URL DESCĂRCARE: {url}')
+            install_update(low, f'{label} — conectare la URL')
+            req = urllib.request.Request(url, headers={'User-Agent': 'Minecraft-Hosting/1.8 (+https://github.com/)'})
+            last_logged = -1
+            try:
+                with urllib.request.urlopen(req, timeout=300) as response:
+                    total = int(response.headers.get('Content-Length', 0))
+                    install_log(f"HTTP {getattr(response, 'status', 200)}; Content-Length: {(total if total else 'necunoscut')} bytes")
+                    done = 0
+                    with open(temporary, 'wb') as output:
+                        while True:
+                            chunk = response.read(1024 * 256)
+                            if not chunk:
+                                break
+                            output.write(chunk)
+                            done += len(chunk)
+                            if total:
+                                fraction = min(1.0, done / total)
+                                pct = int(fraction * 100)
+                                overall = low + int(fraction * (high - low))
+                                install_state.update(percent=max(0, min(99, overall)), stage=f'{label} — {pct}% ({done / 1048576:.1f} / {total / 1048576:.1f} MB)')
+                                if pct >= last_logged + 2 or done >= total:
+                                    install_log(f'{label}: {pct}% — {done / 1048576:.2f} / {total / 1048576:.2f} MB')
+                                    last_logged = pct
+                            else:
+                                install_state.update(stage=f'{label} — {done / 1048576:.1f} MB descărcați')
+                if not temporary.exists() or temporary.stat().st_size == 0:
+                    raise RuntimeError(f'Downloaded file is empty: {url}')
+                install_update(high, f'{label} — verificare JAR')
+                if not zipfile.is_zipfile(temporary):
+                    raise RuntimeError(f'Downloaded response is not a valid JAR/ZIP file (URL: {url})')
+                temporary.replace(destination)
+                install_log(f'DESCĂRCARE COMPLETĂ: {destination.name} ({destination.stat().st_size / 1048576:.2f} MB)')
+            except urllib.error.HTTPError as exc:
+                temporary.unlink(missing_ok=True)
+                install_log(f'EROARE HTTP {exc.code} la {url}: {exc.reason}')
+                raise RuntimeError(f'Download HTTP {exc.code} for {url}: {exc.reason}') from exc
+            except urllib.error.URLError as exc:
+                temporary.unlink(missing_ok=True)
+                install_log(f'EROARE CONEXIUNE la {url}: {exc.reason}')
+                raise RuntimeError(f'Download connection failed for {url}: {exc.reason}') from exc
+            except Exception as exc:
+                temporary.unlink(missing_ok=True)
+                install_log(f'EROARE DESCĂRCARE: {type(exc).__name__}: {exc}')
+                raise
+
+        def run_installer(command, stage, timeout=900):
+            install_update(60, f'{stage} — pornire')
+            install_log('EXECUTARE INSTALLER: ' + shlex.join([str(x) for x in command]))
+            proc = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            output_queue = queue.Queue()
+
+            def pump_output():
+                try:
+                    for line in iter(proc.stdout.readline, ''):
+                        output_queue.put(line.rstrip('\r\n'))
+                finally:
+                    output_queue.put(None)
+            reader = threading.Thread(target=pump_output, daemon=True)
+            reader.start()
+            deadline = time.monotonic() + timeout
+            finished_stream = False
+            tail = []
+            while not finished_stream or proc.poll() is None:
+                if time.monotonic() > deadline and proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    install_log(f'TIMEOUT: {stage} a depășit {timeout} secunde.')
+                    raise RuntimeError(f'{stage} timed out after {timeout} seconds')
+                try:
+                    line = output_queue.get(timeout=0.25)
+                    if line is None:
+                        finished_stream = True
+                    elif line:
+                        tail.append(line)
+                        install_log(line)
+                        if len(tail) > 80:
+                            tail.pop(0)
+                except queue.Empty:
+                    pass
+            code = proc.wait()
+            install_log(f'{stage} s-a încheiat cu exit code {code}.')
+            if code != 0:
+                raise RuntimeError(f'{stage} failed with exit code {code}. Last output: ' + ' | '.join(tail[-12:]))
+            return tail
+
+        def minecraft_versions():
+            data = json_url('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
+            return [{'id': v['id'], 'type': v['type']} for v in data['versions'] if v['type'] == 'release']
+
+        def papermc_json(path):
+            data = json_url('https://fill.papermc.io/v3' + path, 'Minecraft-Hosting/1.8 (https://github.com/)')
+            if isinstance(data, dict) and data.get('ok') is False:
+                raise RuntimeError(data.get('message', 'PaperMC API request failed'))
+            return data
+
+        def papermc_versions(project):
+            data = papermc_json('/projects/' + project)
+            grouped = data.get('versions') if isinstance(data, dict) else None
+            if not isinstance(grouped, dict):
+                raise RuntimeError(f'PaperMC returned an unexpected version list for {project}')
+            versions = []
+            for group_versions in grouped.values():
+                if isinstance(group_versions, list):
+                    versions.extend((str(value) for value in group_versions))
+            return list(dict.fromkeys(versions))
+
+        def papermc_stable_download(project, version):
+            safe_version = urllib.parse.quote(str(version), safe='')
+            builds = papermc_json(f'/projects/{project}/versions/{safe_version}/builds')
+            if not isinstance(builds, list):
+                raise RuntimeError(f'PaperMC returned an unexpected builds list for {project} {version}')
+            for build in builds:
+                if not isinstance(build, dict) or build.get('channel') != 'STABLE':
+                    continue
+                artifact = (build.get('downloads') or {}).get('server:default')
+                if artifact and artifact.get('url'):
+                    return artifact
+            raise RuntimeError(f'No stable {project} build exists for version {version}')
+
+        def download_verified(url, destination, checksum=None, stage='Downloading server JAR'):
+            download(url, destination, stage=stage)
+            if checksum:
+                install_log('Verificare SHA-256 pentru ' + Path(destination).name)
+                digest = hashlib.sha256()
+                with open(destination, 'rb') as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        digest.update(chunk)
+                actual = digest.hexdigest().lower()
+                if not secrets.compare_digest(actual, str(checksum).lower()):
+                    Path(destination).unlink(missing_ok=True)
+                    raise RuntimeError('SHA-256 verification failed for downloaded server JAR')
+                install_log('SHA-256 valid.')
+
+        def paper_versions():
+            return papermc_versions('paper')
+
+        def velocity_versions():
+            return [v for v in papermc_versions('velocity') if 'SNAPSHOT' not in v.upper()]
+
+        def fabric_loaders(mc):
+            url = 'https://meta.fabricmc.net/v2/versions/loader/' + urllib.parse.quote(mc, safe='')
+            data = json_url(url)
+            if not isinstance(data, list):
+                raise RuntimeError('Fabric Meta returned an unexpected loader list')
+            result = []
+            for item in data:
+                loader = item.get('loader') if isinstance(item, dict) else None
+                if isinstance(loader, dict) and loader.get('version'):
+                    result.append({'id': str(loader['version']), 'stable': bool(loader.get('stable', False))})
+            return result
+
+        def fabric_installers():
+            data = json_url('https://meta.fabricmc.net/v2/versions/installer')
+            if not isinstance(data, list):
+                raise RuntimeError('Fabric Meta returned an unexpected installer list')
+            valid = [item for item in data if isinstance(item, dict) and item.get('version')]
+            stable = [item for item in valid if item.get('stable') is True]
+            return stable or valid
+
+        def forge_versions(mc):
+            url = 'https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml'
+            req = urllib.request.Request(url, headers={'User-Agent': 'Minecraft-Hosting/1.8'})
+            try:
+                with urllib.request.urlopen(req, timeout=45) as response:
+                    root = ET.fromstring(response.read())
+            except urllib.error.HTTPError as exc:
+                raise RuntimeError(f'Forge metadata HTTP {exc.code}: {exc.reason}') from exc
+            values = [item.text for item in root.findall('.//version') if item.text and item.text.startswith(mc + '-')]
+            return list(reversed(values))
+
+        def neoforge_versions(mc):
+            match = re.fullmatch('1\\.(\\d+)\\.(\\d+)', mc)
+            if not match:
+                return []
+            prefix = match.group(1) + '.' + match.group(2) + '.'
+            url = 'https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml'
+            req = urllib.request.Request(url, headers={'User-Agent': 'Minecraft-Hosting/1.8'})
+            try:
+                with urllib.request.urlopen(req, timeout=45) as response:
+                    root = ET.fromstring(response.read())
+            except urllib.error.HTTPError as exc:
+                raise RuntimeError(f'NeoForge metadata HTTP {exc.code}: {exc.reason}') from exc
+            values = [item.text for item in root.findall('.//version') if item.text and item.text.startswith(prefix)]
+            return list(reversed(values))
+
+        def quilt_loaders(mc):
+            safe = urllib.parse.quote(str(mc), safe='')
+            data = json_url(f'https://meta.quiltmc.org/v3/versions/loader/{safe}')
+            if not isinstance(data, list):
+                raise RuntimeError('Quilt Meta returned an unexpected loader list')
+            result = []
+            for item in data:
+                loader = item.get('loader') if isinstance(item, dict) else None
+                if isinstance(loader, dict) and loader.get('version'):
+                    result.append({'id': str(loader['version']), 'stable': bool(loader.get('stable', True))})
+            return result
+
+        def arclight_builds(mc):
+            data = json_url('https://api.github.com/repos/IzzelAliz/Arclight/releases?per_page=100', 'Minecraft-Hosting/1.8 (https://github.com/)')
+            if not isinstance(data, list):
+                raise RuntimeError('Arclight releases API returned an unexpected response')
+            result = []
+            for release in data:
+                for asset in release.get('assets', []):
+                    name = str(asset.get('name', ''))
+                    if name.lower().endswith('.jar') and (not any((part in name.lower() for part in ('installer', 'sources', 'javadoc')))) and re.search('(?<![0-9.])' + re.escape(mc) + '(?![0-9.])', name, re.IGNORECASE) and asset.get('browser_download_url'):
+                        result.append({'id': name, 'stable': not release.get('prerelease', False)})
+            return result
+
+        def bungeecord_builds():
+            data = json_url('https://ci.md-5.net/job/BungeeCord/api/json?tree=builds[number,result]{0,20}', 'Minecraft-Hosting/1.8 (https://github.com/)')
+            builds = data.get('builds', []) if isinstance(data, dict) else []
+            return [{'id': str(item['number']), 'stable': item.get('result') == 'SUCCESS'} for item in builds if item.get('number') and item.get('result') == 'SUCCESS']
+
+        def catalog(kind, mc=None):
+            if kind == 'minecraft':
+                return minecraft_versions()
+            if kind == 'paper':
+                if not mc:
+                    raise ValueError('Minecraft version is required')
+                return [{'id': mc}] if mc in paper_versions() else []
+            if kind == 'fabric':
+                if not mc:
+                    raise ValueError('Minecraft version is required')
+                return fabric_loaders(mc)
+            if kind == 'forge':
+                if not mc:
+                    raise ValueError('Minecraft version is required')
+                return forge_versions(mc)
+            if kind == 'neoforge':
+                if not mc:
+                    raise ValueError('Minecraft version is required')
+                return neoforge_versions(mc)
+            if kind == 'velocity':
+                return velocity_versions()
+            if kind == 'folia':
+                if not mc:
+                    raise ValueError('Minecraft version is required')
+                return [{'id': mc}] if mc in papermc_versions('folia') else []
+            if kind == 'quilt':
+                if not mc:
+                    raise ValueError('Minecraft version is required')
+                return quilt_loaders(mc)
+            if kind == 'arclight':
+                if not mc:
+                    raise ValueError('Minecraft version is required')
+                return arclight_builds(mc)
+            if kind == 'bungeecord':
+                return bungeecord_builds()
+            raise ValueError('Unknown catalog type')
+
+        def install_vanilla(mc):
+            manifest = json_url('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
+            entry = next((v for v in manifest['versions'] if v['id'] == mc), None)
+            if not entry:
+                raise ValueError('Minecraft version not found')
+            install_update(5, 'Loading Mojang metadata')
+            meta = json_url(entry['url'])
+            install_log('METADATA URL Mojang: ' + entry['url'])
+            download(meta['downloads']['server']['url'], ROOT / 'server.jar', stage='Downloading official Mojang server.jar')
+            return ['-jar', 'server.jar', 'nogui']
+
+        def install_paper(mc):
+            versions = paper_versions()
+            if mc not in versions:
+                raise ValueError('Paper does not support this Minecraft version')
+            artifact = papermc_stable_download('paper', mc)
+            download_verified(artifact['url'], ROOT / 'server.jar', (artifact.get('checksums') or {}).get('sha256'), 'Downloading Paper server JAR')
+            return ['-jar', 'server.jar', 'nogui']
+
+        def install_fabric(mc, loader):
+            available = [item['id'] for item in fabric_loaders(mc)]
+            if loader not in available:
+                raise ValueError(f'Fabric loader {loader} is not available for Minecraft {mc}')
+            installers = fabric_installers()
+            if not installers:
+                raise RuntimeError('Fabric Meta did not provide any installer versions')
+            installer = installers[0]['version']
+            url = f"https://meta.fabricmc.net/v2/versions/loader/{urllib.parse.quote(mc, safe='')}/{urllib.parse.quote(loader, safe='')}/{urllib.parse.quote(installer, safe='')}/server/jar"
+            download(url, ROOT / 'server.jar', stage='Downloading Fabric server JAR')
+            return ['-jar', 'server.jar', 'nogui']
+
+        def install_forge(mc, loader):
+            available = forge_versions(mc)
+            if loader not in available:
+                raise ValueError('Forge version is not available for this Minecraft version')
+            full = loader if loader.startswith(mc + '-') else f'{mc}-{loader}'
+            url = f'https://maven.minecraftforge.net/net/minecraftforge/forge/{full}/forge-{full}-installer.jar'
+            installer = ROOT / 'forge-installer.jar'
+            download(url, installer, 10, 55, 'Downloading Forge installer JAR')
+            run_installer(['java', '-jar', str(installer), '--installServer'], 'Forge server installer', 900)
+            args = ROOT / 'libraries' / 'net' / 'minecraftforge' / 'forge' / full / 'unix_args.txt'
+            if not args.exists():
+                raise RuntimeError('Forge installer completed but unix_args.txt was not found')
+            return ['@' + str(args), 'nogui']
+
+        def install_neoforge(mc, loader):
+            if loader not in neoforge_versions(mc):
+                raise ValueError('NeoForge version is not available for this Minecraft version')
+            installer = ROOT / 'neoforge-installer.jar'
+            url = f'https://maven.neoforged.net/releases/net/neoforged/neoforge/{loader}/neoforge-{loader}-installer.jar'
+            download(url, installer, 10, 55, 'Downloading NeoForge installer JAR')
+            run_installer(['java', '-jar', str(installer), '--install-server'], 'NeoForge server installer', 900)
+            args = ROOT / 'libraries' / 'net' / 'neoforged' / 'neoforge' / loader / 'unix_args.txt'
+            if not args.exists():
+                candidates = list(ROOT.glob('libraries/net/neoforged/neoforge/**/unix_args.txt'))
+                if candidates:
+                    args = candidates[-1]
+            if not args.exists():
+                raise RuntimeError('NeoForge installer completed but unix_args.txt was not found')
+            return ['@' + str(args), 'nogui']
+
+        def install_velocity(version):
+            versions = velocity_versions()
+            if version not in versions:
+                raise ValueError(f'Velocity release {version} is not available')
+            artifact = papermc_stable_download('velocity', version)
+            download_verified(artifact['url'], ROOT / 'server.jar', (artifact.get('checksums') or {}).get('sha256'), 'Downloading Velocity proxy JAR')
+            return ['-jar', 'server.jar']
+
+        def install_folia(mc):
+            versions = papermc_versions('folia')
+            if mc not in versions:
+                raise ValueError('Folia does not support this Minecraft version')
+            artifact = papermc_stable_download('folia', mc)
+            download_verified(artifact['url'], ROOT / 'server.jar', (artifact.get('checksums') or {}).get('sha256'), 'Downloading Folia server JAR')
+            return ['-jar', 'server.jar', 'nogui']
+
+        def install_quilt(mc, loader):
+            available = [item['id'] for item in quilt_loaders(mc)]
+            if loader not in available:
+                raise ValueError(f'Quilt loader {loader} is not available for Minecraft {mc}')
+            versions = json_url('https://meta.quiltmc.org/v3/versions/installer')
+            if not isinstance(versions, list) or not versions:
+                raise RuntimeError('Quilt Meta did not provide installer versions')
+            stable = [v for v in versions if isinstance(v, dict) and v.get('version') and v.get('stable', True)]
+            installer_version = str((stable or versions)[0].get('version'))
+            installer = ROOT / 'quilt-installer.jar'
+            url = f"https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/{urllib.parse.quote(installer_version, safe='')}/quilt-installer-{urllib.parse.quote(installer_version, safe='')}.jar"
+            download(url, installer, 10, 45, 'Downloading Quilt installer JAR')
+            install_update(60, 'Installing Quilt server and downloading Minecraft server')
+            subprocess.run(['java', '-jar', str(installer), 'install', 'server', mc, loader, '--download-server', '--install-dir="."'], cwd=ROOT, check=True, timeout=900)
+            launch = ROOT / 'quilt-server-launch.jar'
+            if not launch.exists():
+                candidates = list(ROOT.glob('**/quilt-server-launch.jar'))
+                if candidates:
+                    launch = candidates[0]
+            if not launch.exists():
+                raise RuntimeError('Quilt installer finished but quilt-server-launch.jar was not found')
+            if launch.parent != ROOT:
+                target = ROOT / 'quilt-server-launch.jar'
+                shutil.copy2(launch, target)
+            return ['-jar', 'quilt-server-launch.jar', 'nogui']
+
+        def install_arclight(mc, asset_name):
+            builds = arclight_builds(mc)
+            if asset_name not in [item['id'] for item in builds]:
+                raise ValueError('Selected Arclight build is no longer available for this Minecraft version')
+            data = json_url('https://api.github.com/repos/IzzelAliz/Arclight/releases?per_page=100', 'Minecraft-Hosting/1.8 (https://github.com/)')
+            asset = next((a for r in data for a in r.get('assets', []) if a.get('name') == asset_name), None)
+            if not asset or not asset.get('browser_download_url'):
+                raise RuntimeError('Arclight release asset could not be resolved')
+            destination = ROOT / 'server.jar'
+            download(asset['browser_download_url'], destination, 10, 75, 'Downloading Arclight server JAR')
+            return ['-jar', 'server.jar', 'nogui']
+
+        def install_bungeecord(build_number):
+            if build_number not in [item['id'] for item in bungeecord_builds()]:
+                raise ValueError('Selected BungeeCord build is no longer available')
+            data = json_url(f"https://ci.md-5.net/job/BungeeCord/{urllib.parse.quote(str(build_number), safe='')}/api/json?tree=number,result,artifacts[fileName,relativePath]", 'Minecraft-Hosting/1.8 (https://github.com/)')
+            artifacts = data.get('artifacts', []) if isinstance(data, dict) else []
+            artifact = next((a for a in artifacts if str(a.get('fileName', '')).lower().endswith('.jar') and a.get('relativePath')), None)
+            if not artifact:
+                raise RuntimeError('BungeeCord build has no downloadable JAR artifact')
+            url = 'https://ci.md-5.net/job/BungeeCord/' + str(build_number) + '/artifact/' + urllib.parse.quote(artifact['relativePath'], safe='/')
+            download(url, ROOT / 'BungeeCord.jar', 10, 75, 'Downloading BungeeCord proxy JAR')
+            return ['-jar', 'BungeeCord.jar']
+
+        def install_worker(data):
+            global cfg
+            try:
+                install_state.update(running=True, done=False, percent=1, stage='Preparing installation', error=None, result=None, logs=[])
+                install_log('Începere instalare Minecraft Hosting.')
+                mc = str(data.get('minecraft', '')).strip()
+                kind = str(data.get('software', '')).strip()
+                loader = str(data.get('loader', '')).strip()
+                memory = str(data.get('memory', '4G')).upper().strip()
+                if memory not in ('2G', '3G', '4G', '5G', '6G', '8G', '10G', '12G'):
+                    raise ValueError('Choose a supported RAM allocation')
+                if not re.fullmatch('[0-9A-Za-z._-]+', mc):
+                    raise ValueError('Select a valid Minecraft version')
+                if kind not in ('Vanilla', 'Paper', 'Fabric', 'Forge', 'NeoForge', 'Velocity', 'Folia', 'Quilt', 'Arclight', 'BungeeCord'):
+                    raise ValueError('Unsupported server software')
+                if kind in ('Fabric', 'Forge', 'NeoForge', 'Velocity', 'Quilt', 'Arclight', 'BungeeCord') and (not loader):
+                    raise ValueError(f'Select a valid {kind} version')
+                ROOT.mkdir(parents=True, exist_ok=True)
+                install_log(f"Configurație: software={kind}; Minecraft={mc}; loader/release={loader or 'N/A'}")
+                install_update(3, 'Preparing server directory')
+                if kind == 'Vanilla':
+                    command = install_vanilla(mc)
+                elif kind == 'Paper':
+                    command = install_paper(mc)
+                    loader = ''
+                elif kind == 'Fabric':
+                    command = install_fabric(mc, loader)
+                elif kind == 'Forge':
+                    command = install_forge(mc, loader)
+                elif kind == 'NeoForge':
+                    command = install_neoforge(mc, loader)
+                elif kind == 'Velocity':
+                    command = install_velocity(loader)
+                elif kind == 'Folia':
+                    command = install_folia(mc)
+                    loader = ''
+                elif kind == 'Quilt':
+                    command = install_quilt(mc, loader)
+                elif kind == 'Arclight':
+                    command = install_arclight(mc, loader)
+                else:
+                    command = install_bungeecord(loader)
+                install_update(82, 'Creating server configuration')
+                if kind not in ('Velocity', 'BungeeCord'):
+                    (ROOT / 'eula.txt').write_text('eula=true\n')
+                    props = ROOT / 'server.properties'
+                    if not props.exists():
+                        props.write_text('server-port=25565\nmax-players=20\nmotd=Ultimate Minecraft Hosting\nonline-mode=true\n')
+                else:
+                    (ROOT / 'config.yml').touch(exist_ok=True)
+                cfg.update({'installed': True, 'type': kind, 'version': mc, 'loader_version': loader, 'memory': memory, 'command': command, 'installed_at': utc(), 'max_players': 20})
+                write_json(CONFIG, cfg)
+                install_update(95, 'Finalizing installation')
+                install_log('Comanda de pornire configurată: ' + shlex.join([str(x) for x in command]))
+                install_log('Instalarea s-a încheiat cu succes.')
+                install_state.update(running=False, done=True, percent=100, stage='Installation complete', error=None, result={'software': kind, 'minecraft': mc, 'loader': loader})
+            except Exception as exc:
+                app.logger.exception('Minecraft server installation failed')
+                install_log(f'INSTALARE EȘUATĂ: {type(exc).__name__}: {exc}')
+                install_state.update(running=False, done=True, stage='Installation failed', error=str(exc))
+
+        def start_server():
+            global process, server_psutil, server_ready_flag, started_at, run_log_start, expected_stop, exit_processed
+            global crash_event, last_tps_query, tps_log_offset, tps_value, tps_updated_at
+            with lock:
+                if process and process.poll() is None:
+                    return (False, 'Server is already running')
+                observe_exit()
+                if not cfg.get('installed'):
+                    return (False, 'Install a server first')
+                command = cfg.get('command') or ['-jar', 'server.jar', 'nogui']
+                memory = str(cfg.get('memory', '4G')).upper()
+                if memory not in ('2G', '3G', '4G', '5G', '6G', '8G', '10G', '12G'):
+                    memory = '4G'
+                args = ['java', '-Xms1G', '-Xmx' + memory] + command
+                handle = open(LOG, 'a', buffering=1)
+                run_log_start = LOG.stat().st_size if LOG.exists() else 0
+                process = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.PIPE, stdout=handle, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                handle.close()
+                (RUNTIME / 'server.pid').write_text(str(process.pid))
+                started_at = time.time()
+                server_ready_flag = False
+                try:
+                    server_psutil = psutil.Process(process.pid)
+                    server_psutil.cpu_percent(interval=None)
+                except (psutil.Error, OSError):
+                    server_psutil = None
+                expected_stop = False
+                exit_processed = False
+                crash_event = None
+                last_tps_query = 0.0
+                tps_log_offset = run_log_start
+                tps_value = None
+                tps_updated_at = 0.0
+                return (True, 'Server starting')
+
+        def running():
+            return process is not None and process.poll() is None
+
+        def server_ready():
+            global server_ready_flag
+            if not running():
+                return False
+            if server_ready_flag:
+                return True
+            if not LOG.exists():
+                return False
+            try:
+                with open(LOG, 'rb') as stream:
+                    stream.seek(min(run_log_start, LOG.stat().st_size))
+                    stream.seek(max(run_log_start, LOG.stat().st_size - 131072))
+                    tail = stream.read().decode('utf-8', 'replace')
+            except OSError:
+                return False
+            kind = str(cfg.get('type', '')).lower()
+            if kind in ('velocity', 'bungeecord'):
+                patterns = ('\\bDone \\([^)]+\\)!', '\\bListening on\\b', '\\bEnabled BungeeCord version\\b')
+            else:
+                patterns = ('\\bDone \\([^)]+\\)!', '\\bFor help, type [\\\'\\"]help[\\\'\\"]', '\\bServer started\\b')
+            if any((re.search(pattern, tail, re.I) for pattern in patterns)):
+                server_ready_flag = True
+            return server_ready_flag
+
+        def observe_exit():
+            global exit_processed, crash_event
+            if process is None or started_at is None or exit_processed:
+                return
+            code = process.poll()
+            if code is None:
+                return
+            exit_processed = True
+            (RUNTIME / 'server.pid').unlink(missing_ok=True)
+            if not expected_stop and code != 0:
+                crash_event = {'detected': True, 'exit_code': code, 'time': utc(), 'started_at': started_at, 'duration': max(0, int(time.time() - started_at))}
+            else:
+                crash_event = None
+
+        def send_command(command):
+            if not running():
+                raise RuntimeError('Server is not running')
+            if '\n' in command or '\r' in command:
+                raise ValueError('Invalid command')
+            process.stdin.write(command + '\n')
+            process.stdin.flush()
+
+        def stop_server(force=False):
+            global expected_stop
+            with lock:
+                if not running():
+                    observe_exit()
+                    (RUNTIME / 'server.pid').unlink(missing_ok=True)
+                    return
+                expected_stop = True
+                try:
+                    if force:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        send_command('stop')
+                        process.wait(timeout=60)
+                except Exception:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        process.wait(timeout=10)
+                    except Exception:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                            process.wait(timeout=5)
+                        except Exception:
+                            pass
+                finally:
+                    observe_exit()
+                    (RUNTIME / 'server.pid').unlink(missing_ok=True)
+
+        def log_tail(lines=350):
+            if not LOG.exists():
+                return ''
+            return '\n'.join(LOG.read_text(errors='replace').splitlines()[-lines:])
+
+        def diagnose_crash():
+            if not crash_event or not crash_event.get('detected'):
+                return None
+            log_lines = current_run_log_lines()
+            report_lines = crash_report_lines()
+            sources = log_lines + report_lines
+            joined = '\n'.join(sources)
+            checks = [('OutOfMemoryError|Java heap space|GC overhead limit exceeded|unable to create native thread', 'Memorie insuficientă (OOM)', 'Procesul Java a rămas fără memorie heap, memorie nativă sau resurse pentru thread-uri.', 'Verifică limita -Xmx, memoria disponibilă a runnerului și modurile/pluginurile care consumă mult. Dacă eroarea este native-thread, redu thread-urile și încărcarea.'), ('UnsupportedClassVersionError|class file version .* is not supported|compiled by a more recent version of the Java Runtime', 'Versiune Java incompatibilă', 'Un JAR a fost compilat pentru o versiune Java mai nouă sau diferită de runtime-ul folosit.', 'Folosește versiunea Java cerută de versiunea Minecraft și de loader. Verifică și cerințele modurilor/pluginurilor.'), ('Mixin apply failed|MixinTransformerError|InjectionError|Critical injection failure|Mixin.*failed', 'Conflict de Mixin / mod incompatibil', 'Un Mixin nu a putut modifica o clasă țintă; de regulă există o incompatibilitate între moduri, loader sau versiuni.', 'Verifică numele modului din liniile de context, aliniază versiunile pentru aceeași versiune Minecraft și elimină temporar ultimul mod adăugat.'), ('ModLoadingException|Failed to load mods|Errors during loading|Missing or unsupported mandatory dependencies|MissingModsException', 'Mod lipsă, incompatibil sau dependență absentă', 'Loaderul a oprit pornirea deoarece un mod este incompatibil ori îi lipsește o dependență obligatorie.', 'Folosește Failure message / Mod File din raport pentru a identifica exact modurile și instalează dependențele cerute.'), ('NoClassDefFoundError|ClassNotFoundException|NoSuchMethodError|NoSuchFieldError', 'Clasă, metodă sau bibliotecă incompatibilă', 'Un mod/plugin caută o clasă, metodă sau bibliotecă absentă din combinația instalată.', 'Actualizează sau revino la versiunea compatibilă a modului/pluginului și verifică dependențele sale.'), ('InvalidPluginException|Could not load plugin|Error loading plugin|Plugin .* generated an exception', 'Plugin defect sau incompatibil', 'Un plugin nu s-a putut încărca ori a produs o excepție în timpul inițializării.', 'Identifică pluginul din mesaj, verifică versiunea sa pentru serverul curent și actualizează dependențele.'), ('Address already in use|Failed to bind to port|Could not bind .*port|BindException', 'Port deja utilizat', 'Serverul nu a putut deschide portul de rețea configurat.', 'Verifică portul configurat și oprește procesul care îl ocupă sau schimbă portul serverului.'), ('Watchdog|A single server tick took|The server has stopped responding|Can.t keep up', 'Server blocat / tick-uri prea lente', 'Watchdog-ul a detectat un tick extrem de lent sau un server care nu mai răspunde.', 'Verifică operația și pluginul/modul activ în momentul blocării; redu încărcarea lumii și analizează CPU-ul serverului.'), ('Corrupt.*(chunk|region|NBT)|Failed to read chunk|Anvil.*corrupt|Exception reading.*region', 'Posibilă corupere a lumii', 'Logul indică o problemă la citirea datelor de chunk, region sau NBT.', 'Nu șterge lumea. Păstrează fișierele și restaurează un backup sănătos înainte de alte încercări.'), ('AccessDeniedException|Permission denied|Operation not permitted', 'Acces refuzat la fișiere', 'Procesul Java nu a putut citi sau scrie într-un fișier sau director necesar.', 'Verifică permisiunile și dacă fișierul sau directorul nu este read-only ori blocat.'), ('StackOverflowError|EXCEPTION_ACCESS_VIOLATION|A fatal error has been detected by the Java Runtime Environment|SIGSEGV', 'Eroare fatală JVM / stack overflow', 'JVM sau un thread Java a întâmpinat o eroare fatală, posibil cauzată de cod nativ ori recursie excesivă.', 'Verifică fișierul hs_err_pid, versiunile Java și modurile/pluginurile încărcate înainte de închidere.')]
+            match = next((item for item in checks if re.search(item[0], joined, re.I)), None)
+            root_causes = [line.strip() for line in sources if re.search('Caused by:', line, re.I)]
+            failure_lines = [line.strip() for line in sources if re.search('Failure message:|Mod File:|Description:|Exception in thread|FATAL|Fatal error', line, re.I)]
+            evidence = []
+            if root_causes:
+                evidence.extend(root_causes[-3:])
+            if failure_lines:
+                evidence.extend(failure_lines[-5:])
+            if not evidence:
+                evidence.extend([line.strip() for line in sources if re.search('ERROR|SEVERE|FATAL|Exception|Error|crash', line, re.I)][-8:])
+            evidence = list(dict.fromkeys(evidence))[-8:]
+            if match:
+                title, cause, action = (match[1], match[2], match[3])
+                confidence = 'Ridicată' if root_causes or report_lines else 'Medie'
+            else:
+                title = 'Oprire neașteptată — cauză neconfirmată'
+                cause = f"Procesul serverului s-a închis neașteptat cu exit code {crash_event.get('exit_code')}. Logurile disponibile nu conțin o semnătură suficientă pentru a atribui cauza cu certitudine."
+                if root_causes:
+                    cause += ' Ultima cauză explicită din log: ' + root_causes[-1]
+                action = 'Verifică dovezile atașate și liniile imediat anterioare opririi. Nu elimina moduri, pluginuri sau fișiere de lume fără backup.'
+                confidence = 'Scăzută'
+            return {'detected': True, 'title': title, 'confidence': confidence, 'cause': cause, 'action': action, 'evidence': evidence, 'exit_code': crash_event.get('exit_code'), 'crash_time': crash_event.get('time'), 'runtime_seconds': crash_event.get('duration')}
+
+        def current_run_log_lines():
+            if not LOG.exists():
+                return []
+            try:
+                with open(LOG, 'rb') as stream:
+                    stream.seek(min(run_log_start, LOG.stat().st_size))
+                    data = stream.read()
+                return data.decode('utf-8', 'replace').splitlines()[-1800:]
+            except OSError:
+                return []
+
+        def crash_report_lines():
+            reports = ROOT / 'crash-reports'
+            if not reports.exists():
+                return []
+            cutoff = (started_at or 0) - 3
+            files = sorted((p for p in reports.glob('*.txt') if p.stat().st_mtime >= cutoff), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not files:
+                return []
+            try:
+                return files[0].read_text(errors='replace').splitlines()[-800:]
+            except OSError:
+                return []
+
+        def tps_command():
+            kind = str(cfg.get('type', '')).lower()
+            if kind in ('paper', 'folia', 'arclight'):
+                return 'tps'
+            if kind == 'forge':
+                return 'forge tps'
+            if kind == 'neoforge':
+                return 'neoforge tps'
+            if kind == 'fabric':
+                mods = ROOT / 'mods'
+                if mods.exists() and any((p.is_file() and p.suffix.lower() == '.jar' and ('spark' in p.name.lower()) for p in mods.glob('*.jar'))):
+                    return 'spark tps'
+            return None
+
+        def update_tps():
+            global last_tps_query, tps_log_offset, tps_value, tps_updated_at
+            if not running() or not server_ready():
+                return None
+            now = time.time()
+            if tps_updated_at and now - tps_updated_at > 30:
+                tps_value = None
+            if now - last_tps_query >= 10:
+                command = tps_command()
+                if command:
+                    tps_log_offset = LOG.stat().st_size if LOG.exists() else 0
+                    try:
+                        send_command(command)
+                        install_log(f'TPS probe trimis: {command}') if install_state.get('running') else None
+                    except Exception:
+                        pass
+                last_tps_query = now
+            if LOG.exists():
+                try:
+                    with open(LOG, 'rb') as stream:
+                        stream.seek(min(tps_log_offset, LOG.stat().st_size))
+                        fresh = stream.read().decode('utf-8', 'replace')
+                    patterns = ['current tick rate is\\s*([0-9]+(?:\\.[0-9]+)?)', 'tick rate\\s*[:=]\\s*([0-9]+(?:\\.[0-9]+)?)', 'TPS from last 1m[^:]*:\\s*([0-9]+(?:\\.[0-9]+)?)', 'TPS\\s*\\(1m[^)]*\\)\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)', 'Mean TPS\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)', 'Average TPS\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)', 'Overall TPS\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)']
+                    for pattern in patterns:
+                        found = re.search(pattern, fresh, re.I)
+                        if found:
+                            tps_value = max(0.0, min(20.0, float(found.group(1))))
+                            tps_updated_at = now
+                            break
+                except OSError:
+                    pass
+            return tps_value
+
+        def make_backup():
+            if running():
+                raise RuntimeError('Stop the server before backing up')
+            name = 'backup-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '.zip'
+            target = BACKUPS / name
+            with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
+                for item in ROOT.rglob('*'):
+                    if item.is_file():
+                        z.write(item, item.relative_to(ROOT))
+            return name
+
+        @app.get('/')
+        def index():
+            return render_template_string(PAGE)
+
+        @app.post('/api/login')
+        def login():
+            data = request.get_json(silent=True) or {}
+            users = read_json(USERS, {})
+            user = users.get(str(data.get('username', '')))
+            if not user or not verify_password(str(data.get('password', '')), user['password']):
+                return (jsonify(error='Invalid username or password'), 401)
+            session.clear()
+            session.permanent = True
+            session['username'] = str(data['username'])
+            session['csrf'] = secrets.token_urlsafe(32)
+            return jsonify(ok=True, username=session['username'], role=user['role'], csrf=session['csrf'])
+
+        @app.get('/api/me')
+        @logged_in
+        def me():
+            users = read_json(USERS, {})
+            user = users.get(session['username'], {})
+            return jsonify(username=session['username'], role=user.get('role', 'Unknown'), csrf=session.get('csrf', ''))
+
+        @app.post('/api/logout')
+        @logged_in
+        def logout():
+            session.clear()
+            return jsonify(ok=True)
+
+        @app.get('/api/catalog/<kind>')
+        @logged_in
+        def get_catalog(kind):
+            mc = request.args.get('minecraft', '')
+            try:
+                return jsonify(items=catalog(kind, mc))
+            except Exception as exc:
+                return (jsonify(error=str(exc)), 502)
+
+        @app.post('/api/install')
+        @roles('Owner', 'Admin')
+        def install():
+            if install_state['running']:
+                return (jsonify(error='Installation already running'), 409)
+            data = request.get_json(silent=True) or {}
+            if not data.get('minecraft') or not data.get('software'):
+                return (jsonify(error='Choose a Minecraft version and software'), 400)
+            threading.Thread(target=install_worker, args=(data,), daemon=True).start()
+            return jsonify(ok=True, message='Installation started')
+
+        @app.get('/api/install/status')
+        @logged_in
+        def install_status():
+            return jsonify(install_state)
+
+        @app.get('/api/status')
+        @logged_in
+        def status():
+            observe_exit()
+            is_running = running()
+            is_ready = server_ready() if is_running else False
+            cpu = None
+            ram_used = None
+            ram_limit = None
+            ram_percent = None
+            tps = None
+            if is_running:
+                try:
+                    global server_psutil
+                    if server_psutil is None or server_psutil.pid != process.pid:
+                        server_psutil = psutil.Process(process.pid)
+                        server_psutil.cpu_percent(interval=None)
+                    cpu_count = max(1, psutil.cpu_count(logical=True) or 1)
+                    cpu = round(max(0.0, server_psutil.cpu_percent(interval=None) / cpu_count), 1)
+                    rss = server_psutil.memory_info().rss
+                    ram_used = round(rss / 1024 ** 3, 3)
+                    memory_setting = str(cfg.get('memory', '4G')).upper()
+                    match = re.fullmatch('([1-9][0-9]*)([GM])', memory_setting)
+                    if match:
+                        amount = float(match.group(1))
+                        ram_limit = amount if match.group(2) == 'G' else amount / 1024
+                    else:
+                        ram_limit = 4.0
+                    ram_percent = round(rss / (ram_limit * 1024 ** 3) * 100, 1) if ram_limit else None
+                except (psutil.Error, OSError, ValueError):
+                    pass
+                if is_ready:
+                    tps = update_tps()
+            return jsonify(running=is_running, state='running' if is_ready else 'starting' if is_running else 'stopped', installed=cfg.get('installed', False), config=cfg, addon_categories=addon_categories(), cpu=cpu, ram_used=ram_used, ram_limit=ram_limit, ram_percent=ram_percent, tps=tps, tps_command=tps_command(), uptime=int(time.time() - started_at) if is_running and started_at else 0, crash_detected=bool(crash_event and crash_event.get('detected')))
+
+        @app.post('/api/start')
+        @roles('Owner', 'Admin')
+        def start():
+            try:
+                ok, message = start_server()
+                return jsonify(ok=ok, message=message)
+            except Exception as exc:
+                return (jsonify(error=str(exc)), 500)
+
+        @app.post('/api/stop')
+        @roles('Owner', 'Admin')
+        def stop():
+            stop_server()
+            return jsonify(ok=True)
+
+        @app.post('/api/restart')
+        @roles('Owner', 'Admin')
+        def restart():
+            stop_server()
+            time.sleep(2)
+            ok, message = start_server()
+            return jsonify(ok=ok, message=message)
+
+        @app.post('/api/command')
+        @roles('Owner', 'Admin', 'Moderator')
+        def command():
+            data = request.get_json(silent=True) or {}
+            try:
+                send_command(str(data.get('command', '')))
+                return jsonify(ok=True)
+            except Exception as exc:
+                return (jsonify(error=str(exc)), 400)
+
+        @app.get('/api/console')
+        @logged_in
+        def console():
+            observe_exit()
+            diagnostics = diagnose_crash()
+            return jsonify(log=log_tail(), diagnostics=diagnostics, crash_detected=bool(crash_event and crash_event.get('detected')))
+
+        @app.get('/api/files')
+        @logged_in
+        def files():
+            try:
+                path = safe_path(request.args.get('path', ''))
+                if not path.exists():
+                    return (jsonify(error='Not found'), 404)
+                if path.is_file():
+                    return jsonify(type='file', content=path.read_text(errors='replace')[:500000])
+                return jsonify(type='directory', entries=[{'name': p.name, 'directory': p.is_dir(), 'size': p.stat().st_size if p.is_file() else 0} for p in sorted(path.iterdir())])
+            except Exception as exc:
+                return (jsonify(error=str(exc)), 400)
+
+        @app.post('/api/files/save')
+        @roles('Owner', 'Admin')
+        def save_file():
+            data = request.get_json(silent=True) or {}
+            try:
+                path = safe_path(data.get('path', ''))
+                if path == ROOT or path.is_dir():
+                    return (jsonify(error='Choose a file'), 400)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(str(data.get('content', '')))
+                return jsonify(ok=True)
+            except Exception as exc:
+                return (jsonify(error=str(exc)), 400)
+
+        @app.post('/api/player')
+        @roles('Owner', 'Admin', 'Moderator')
+        def player_action():
+            data = request.get_json(silent=True) or {}
+            name = str(data.get('name', ''))
+            action = data.get('action')
+            if not re.fullmatch('[A-Za-z0-9_]{1,16}', name):
+                return (jsonify(error='Invalid player name'), 400)
+            commands = {'kick': f'kick {name}', 'ban': f'ban {name}', 'pardon': f'pardon {name}', 'op': f'op {name}', 'deop': f'deop {name}', 'whitelist_add': f'whitelist add {name}', 'whitelist_remove': f'whitelist remove {name}'}
+            if action not in commands:
+                return (jsonify(error='Invalid action'), 400)
+            try:
+                send_command(commands[action])
+                return jsonify(ok=True)
+            except Exception as exc:
+                return (jsonify(error=str(exc)), 400)
+
+        def addon_categories(server_type=None):
+            kind = str(server_type or cfg.get('type', '')).lower()
+            if kind in ('fabric', 'forge', 'neoforge', 'quilt'):
+                return ['mods']
+            if kind in ('paper', 'folia', 'velocity', 'bungeecord'):
+                return ['plugins']
+            if kind == 'arclight':
+                return ['plugins', 'mods']
+            return []
+
+        @app.get('/api/addons')
+        @logged_in
+        def addons():
+            kind = request.args.get('type', 'plugins')
+            if kind not in addon_categories():
+                return (jsonify(error='This server software does not support this category'), 400)
+            folder = ROOT / kind
+            folder.mkdir(exist_ok=True)
+            return jsonify(files=[{'name': p.name, 'size': p.stat().st_size} for p in folder.iterdir() if p.is_file()])
+
+        @app.post('/api/addons/upload')
+        @roles('Owner', 'Admin')
+        def addon_upload():
+            kind = request.form.get('type', '')
+            file = request.files.get('file')
+            if kind not in addon_categories() or not file:
+                return (jsonify(error='Choose a supported category and JAR file'), 400)
+            filename = Path(file.filename).name
+            if not filename.lower().endswith('.jar'):
+                return (jsonify(error='Only JAR files are accepted'), 400)
+            folder = ROOT / kind
+            folder.mkdir(exist_ok=True)
+            file.save(folder / filename)
+            return jsonify(ok=True)
+
+        @app.get('/api/backups')
+        @logged_in
+        def backups():
+            return jsonify(items=[{'name': p.name, 'size': p.stat().st_size} for p in sorted(BACKUPS.glob('*.zip'), reverse=True)])
+
+        @app.post('/api/backups/create')
+        @roles('Owner', 'Admin')
+        def backup_create():
+            try:
+                return jsonify(ok=True, name=make_backup())
+            except Exception as exc:
+                return (jsonify(error=str(exc)), 400)
+
+        @app.post('/api/backups/restore')
+        @roles('Owner')
+        def backup_restore():
+            if running():
+                return (jsonify(error='Stop server before restoring'), 400)
+            name = str((request.get_json(silent=True) or {}).get('name', ''))
+            if Path(name).name != name or not name.endswith('.zip'):
+                return (jsonify(error='Invalid backup name'), 400)
+            source = BACKUPS / name
+            if not source.exists():
+                return (jsonify(error='Backup not found'), 404)
+            temp = ROOT.parent / 'restore-temp'
+            shutil.rmtree(temp, ignore_errors=True)
+            temp.mkdir()
+            try:
+                with zipfile.ZipFile(source) as archive:
+                    for member in archive.infolist():
+                        target = (temp / member.filename).resolve()
+                        if temp.resolve() not in target.parents and target != temp.resolve():
+                            raise ValueError('Unsafe backup archive')
+                    archive.extractall(temp)
+                shutil.rmtree(ROOT)
+                temp.rename(ROOT)
+                return jsonify(ok=True)
+            except Exception as exc:
+                shutil.rmtree(temp, ignore_errors=True)
+                return (jsonify(error=str(exc)), 400)
+
+        @app.get('/api/users')
+        @roles('Owner', 'Admin')
+        def users():
+            data = read_json(USERS, {})
+            return jsonify(items=[{'username': name, 'role': value['role']} for name, value in data.items()])
+
+        @app.post('/api/users')
+        @roles('Owner')
+        def add_user():
+            data = request.get_json(silent=True) or {}
+            name = str(data.get('username', ''))
+            password = str(data.get('password', ''))
+            role = str(data.get('role', 'Moderator'))
+            if not re.fullmatch('[A-Za-z0-9_-]{3,24}', name):
+                return (jsonify(error='Invalid username'), 400)
+            if len(password) < 12:
+                return (jsonify(error='Password must have at least 12 characters'), 400)
+            if role not in ('Admin', 'Moderator'):
+                return (jsonify(error='Invalid role'), 400)
+            users_data = read_json(USERS, {})
+            if name in users_data:
+                return (jsonify(error='User already exists'), 409)
+            users_data[name] = {'password': hash_password(password), 'role': role}
+            write_json(USERS, users_data)
+            return jsonify(ok=True)
+
+        @app.post('/api/shutdown')
+        @roles('Owner')
+        def shutdown():
+            RUNTIME.joinpath('shutdown.flag').write_text('shutdown')
+            stop_server()
+            return jsonify(ok=True)
+
+        @app.post('/api/emergency')
+        @roles('Owner')
+        def emergency():
+            RUNTIME.joinpath('emergency.flag').write_text('emergency')
+            stop_server(force=True)
+            return jsonify(ok=True)
+
+        @app.post('/api/purge')
+        @roles('Owner')
+        def purge():
+            data = request.get_json(silent=True) or {}
+            if data.get('confirmation') != 'PURGE SERVER':
+                return (jsonify(error='Type PURGE SERVER to confirm'), 400)
+            RUNTIME.joinpath('purge.flag').write_text('purge')
+            stop_server(force=True)
+            return jsonify(ok=True)
+        PAGE = '\n<!doctype html><html lang="en"><head>\n<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Minecraft Hosting</title>\n<style>\n:root{color-scheme:dark;--bg:#070b16;--panel:rgba(17,25,46,.78);--line:rgba(125,155,220,.19);--text:#eef4ff;--muted:#91a3c4;--cyan:#54e5ff;--violet:#9b7bff;--green:#51e6a2;--shadow:0 18px 55px rgba(0,0,0,.32)}\n*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 12% 0%,rgba(46,111,190,.22),transparent 36%),radial-gradient(ellipse at 90% 15%,rgba(130,68,220,.19),transparent 34%),linear-gradient(145deg,#060914,#0a1020 52%,#090d1b);color:var(--text);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;overflow-x:hidden}\nbody:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.16;background-image:linear-gradient(rgba(120,160,230,.08) 1px,transparent 1px),linear-gradient(90deg,rgba(120,160,230,.08) 1px,transparent 1px);background-size:42px 42px;mask-image:linear-gradient(to bottom,black,transparent 85%);z-index:-1}\nheader{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:17px 26px;background:rgba(7,12,26,.76);backdrop-filter:none;border-bottom:1px solid var(--line);box-shadow:0 8px 35px rgba(0,0,0,.18)}\nh1{margin:0;font-size:21px;font-weight:800;letter-spacing:.02em}h1:before{content:"◈";color:var(--cyan);margin-right:11px;text-shadow:0 0 18px var(--cyan)}h2{font-size:25px;letter-spacing:-.035em;margin:4px 0 18px}h3{font-size:16px;margin:0 0 12px}.layout{display:grid;grid-template-columns:228px minmax(0,1fr);min-height:calc(100vh - 68px)}\nnav{position:sticky;top:68px;height:calc(100vh - 68px);overflow:auto;background:rgba(9,15,31,.72);backdrop-filter:none;border-right:1px solid var(--line);padding:19px 13px;display:flex;flex-direction:column;gap:8px}\nbutton{position:relative;border:1px solid rgba(115,155,225,.24);background:linear-gradient(135deg,rgba(35,55,91,.88),rgba(22,31,56,.92));color:#f5f8ff;border-radius:11px;padding:11px 15px;cursor:pointer;font:600 13px inherit;letter-spacing:.01em;transition:transform .2s,border-color .2s,box-shadow .2s,background .2s;box-shadow:inset 0 1px rgba(255,255,255,.045)}button:hover{transform:translateY(-2px);border-color:rgba(84,229,255,.62);box-shadow:0 8px 25px rgba(45,180,255,.13),inset 0 1px rgba(255,255,255,.08);background:linear-gradient(135deg,rgba(37,76,112,.95),rgba(39,42,83,.95))}button:active{transform:translateY(0) scale(.985)}nav button{text-align:left;background:transparent;border-color:transparent;color:#aebdd9;padding:12px 14px}nav button:hover{color:white;background:linear-gradient(90deg,rgba(66,190,235,.15),rgba(133,105,255,.10));border-color:rgba(84,229,255,.18);box-shadow:none}\nmain{padding:28px;max-width:1540px;width:100%;margin:0 auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:15px}.card{position:relative;isolation:isolate;overflow:hidden;background:linear-gradient(145deg,rgba(22,33,59,.84),rgba(12,19,37,.88));border:1px solid var(--line);border-radius:18px;padding:19px;margin-bottom:16px;box-shadow:var(--shadow);backdrop-filter:none;transition:transform .25s,border-color .25s}.card:after{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(circle at 100% 0%,rgba(84,229,255,.075),transparent 38%)}.card:hover{border-color:rgba(84,229,255,.28)}.big{font-size:27px;font-weight:800;letter-spacing:-.04em;text-shadow:0 0 22px rgba(84,229,255,.12)}.muted{color:var(--muted)}\ninput,select,textarea{background:rgba(5,11,25,.86);color:white;border:1px solid rgba(125,155,220,.25);border-radius:10px;padding:12px;width:100%;margin:5px 0 13px;outline:none;transition:border-color .2s,box-shadow .2s}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(84,229,255,.1)}textarea,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}textarea{min-height:180px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(3,8,19,.9);padding:15px;border-radius:12px;max-height:420px;overflow:auto;border:1px solid rgba(110,145,205,.14);color:#c8dcf5}.hidden{display:none!important}.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1}.danger{background:linear-gradient(135deg,#782f4c,#421c38)}.success{color:var(--green)}.error{color:#ff8caa}\n.progress{height:12px;background:rgba(67,88,130,.32);border-radius:30px;overflow:hidden;margin:14px 0;border:1px solid rgba(120,150,210,.12)}.bar{height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--violet),var(--green));background-size:200% 100%;animation:none;transition:width .35s;border-radius:30px;box-shadow:0 0 18px rgba(84,229,255,.3)}@keyframes flow{to{background-position:200% 0}}@keyframes floatGlow{0%,100%{opacity:.55;transform:translateY(0)}50%{opacity:1;transform:translateY(-3px)}}.step{display:flex;gap:12px;margin:16px 0;align-items:center}.step button{flex:1}.consolebox{background:rgba(2,7,17,.92);border:1px solid rgba(84,229,255,.17);border-radius:14px;padding:13px;box-shadow:inset 0 0 28px rgba(35,110,160,.07)}#consolelog,#consolelog2{height:360px;max-height:55vh;overflow:auto;margin:0}.log-error{color:#ff718b}.log-warning{color:#ffd477}.log-info{color:#a8c6e8}.diagnostic{border:1px solid var(--line);border-radius:13px;padding:14px;margin:13px 0;background:rgba(8,15,31,.7)}.diagnostic h4{margin:0 0 8px}.diagnostic pre{max-height:150px;color:#ff9baf}.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin:9px 0}.legend span{font-weight:700}\n.file-toolbar{display:flex;align-items:center;gap:10px;margin:10px 0}.file-list{background:rgba(5,12,26,.72);border:1px solid var(--line);border-radius:13px;overflow:hidden;min-height:120px}.file-entry{display:grid;grid-template-columns:minmax(0,1fr) 110px 90px;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid rgba(125,155,220,.12)}.file-entry:last-child{border-bottom:0}.file-entry button{width:100%;text-align:left;background:transparent;border:0;padding:5px}.file-entry button:hover{background:rgba(84,229,255,.08)}.file-size{color:var(--muted);text-align:right;font-size:12px}.file-empty{padding:18px;color:var(--muted)}.addon-list{margin:12px 0}.addon-card{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid rgba(125,155,220,.12)}.addon-card:last-child{border-bottom:0}.addon-name{overflow-wrap:anywhere;font-weight:700}.addon-meta{color:var(--muted);font-size:12px}.metric .big{margin-top:8px}.metrics-grid .progress{height:9px;margin:12px 0 7px}.metric-note{display:block;color:var(--muted);font-size:12px;min-height:30px}.install-log{height:330px;max-height:45vh;font-size:12px;line-height:1.5;border:1px solid var(--line)}.metric .bar{background:linear-gradient(90deg,var(--cyan),var(--green))}\n#login{background:linear-gradient(145deg,rgba(22,33,59,.94),rgba(8,14,29,.96));border-color:rgba(84,229,255,.25);box-shadow:0 25px 90px rgba(0,0,0,.5),0 0 55px rgba(64,154,255,.08)}#login h2{font-size:27px}#login button{width:100%;background:linear-gradient(100deg,#167da7,#6552c9);border:0;box-shadow:0 8px 25px rgba(74,126,255,.24)}\n@media(max-width:820px){.layout{grid-template-columns:1fr}nav{position:relative;top:0;height:auto;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:10px;border-right:0;border-bottom:1px solid var(--line)}nav button{padding:10px}main{padding:16px}header{padding:15px 17px}}@media(max-width:430px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.card{padding:13px;border-radius:14px}.big{font-size:22px}.file-entry{grid-template-columns:minmax(0,1fr) 65px 62px;padding:9px;gap:5px}}\n\n/* V1.18: vivid accents with low-cost rendering */\n:root{--pink:#ff63b8;--orange:#ffad5c;--blue:#6d9cff;--lime:#c0f36b;--aqua:#45f0d0}\nbody{background:linear-gradient(145deg,#080b19 0%,#10152c 48%,#17102a 100%)}\nbody:before{display:none}\n.card{backdrop-filter:none;box-shadow:0 7px 20px rgba(0,0,0,.20);transition:border-color .15s}\n.card:nth-child(6n+1){border-top:2px solid var(--cyan)}\n.card:nth-child(6n+2){border-top:2px solid var(--violet)}\n.card:nth-child(6n+3){border-top:2px solid var(--pink)}\n.card:nth-child(6n+4){border-top:2px solid var(--orange)}\n.card:nth-child(6n+5){border-top:2px solid var(--green)}\n.card:nth-child(6n){border-top:2px solid var(--blue)}\nnav{backdrop-filter:none;background:rgba(12,18,38,.96)}\nbutton{box-shadow:none;transition:background-color .12s,border-color .12s}\nbutton:hover{transform:none;box-shadow:none}\n.bar{box-shadow:none;background:linear-gradient(90deg,var(--cyan),var(--violet),var(--pink),var(--orange),var(--green))}\n.metric:nth-child(5n+1) .big{color:var(--cyan)}\n.metric:nth-child(5n+2) .big{color:var(--pink)}\n.metric:nth-child(5n+3) .big{color:var(--orange)}\n.metric:nth-child(5n+4) .big{color:var(--lime)}\n.metric:nth-child(5n) .big{color:var(--blue)}\n@media(max-width:600px){body{background:linear-gradient(160deg,#080b19,#10152b 65%,#17102a)}main{padding:12px}.card{box-shadow:0 4px 12px rgba(0,0,0,.18)}nav{gap:5px}nav button{padding:9px 10px}}\n@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}\n</style></head><body>\n<header><h1>⛏ MINECRAFT HOSTING <span class="muted">ULTIMATE / V1.18</span></h1><span class="muted">● CONTROL CENTER</span></header>\n\n<div id="login" class="card" style="max-width:420px;margin:50px auto">\n<h2>Sign in</h2><label>Username</label><input id="username" value="owner">\n<label>Password</label><input id="password" type="password">\n<button onclick="login()">Login</button><p id="loginmsg"></p>\n</div>\n\n<div id="app" class="layout hidden"><nav>\n<button onclick="show(\'overview\')">Overview</button>\n<button onclick="show(\'setup\')">Setup Wizard</button>\n<button onclick="show(\'console\')">Console</button>\n<button onclick="show(\'players\')">Players</button>\n<button onclick="show(\'files\')">File Manager</button>\n<button id="navPlugins" class="hidden" onclick="show(\'plugins\')">Plugins</button>\n<button id="navMods" class="hidden" onclick="show(\'mods\')">Mods</button>\n<button onclick="show(\'backups\')">Backups</button>\n<button onclick="show(\'users\')">Users & Roles</button>\n<button onclick="show(\'monitoring\')">Monitoring</button>\n<button onclick="show(\'settings\')">Settings</button>\n<button onclick="logout()">Logout</button>\n</nav><main>\n\n<section id="overview"><h2>Dashboard</h2>\n<div class="grid">\n<div class="card">Server status<div class="big" id="status">-</div></div>\n<div class="card">Software<div class="big" id="software">-</div></div>\n<div class="card">Minecraft<div class="big" id="version">-</div></div>\n<div class="card">Server CPU<div class="big" id="cpu">-</div><div class="progress"><div class="bar" id="overviewCpuBar"></div></div></div>\n<div class="card">Server RAM<div class="big" id="ram">-</div><div class="progress"><div class="bar" id="overviewRamBar"></div></div></div>\n<div class="card">Server TPS<div class="big" id="overviewTps">-</div><div class="progress"><div class="bar" id="overviewTpsBar"></div></div></div>\n<div class="card">Uptime<div class="big" id="uptime">-</div></div>\n</div>\n<div class="card"><h3>Server controls</h3><div class="row">\n<button onclick="api(\'/api/start\')">▶ Start</button>\n<button onclick="api(\'/api/stop\')">■ Stop</button>\n<button onclick="api(\'/api/restart\')">↻ Restart</button>\n</div></div>\n<div class="card"><h3>Live Console</h3>\n<div class="legend"><span class="log-error">● Errors</span><span class="log-warning">● Warnings</span><span class="log-info">● Info</span></div><div class="consolebox"><pre id="consolelog">Waiting for console...</pre></div><div id="crashdiagnostics" class="diagnostic"><h4>Crash analysis</h4><p>Waiting for log analysis...</p></div>\n<div class="row"><input id="commandInput" placeholder="Minecraft command">\n<button onclick="sendCommand()">Send</button></div>\n<button onclick="refreshConsole()">Refresh now</button>\n</div></section>\n\n<section id="setup" class="hidden"><h2>Setup Wizard</h2>\n<div class="card">\n<div class="step"><span id="stepLabel" class="muted">Step 1 of 5</span><span id="stepName">Minecraft version</span></div>\n<div id="wizard1"><h3>Step 1 — Minecraft version</h3>\n<label>Choose Minecraft version</label><select id="mcversion"></select>\n<p class="muted">Select the game version for your server. Velocity uses this as the target network version.</p>\n<button onclick="nextStep(2)">Next →</button></div>\n<div id="wizard2" class="hidden"><h3>Step 2 — Server software</h3>\n<label>Choose server software</label><select id="softwareSelect" onchange="softwareChanged()">\n<option value="Vanilla">Vanilla</option><option value="Paper">Paper</option>\n<option value="Fabric">Fabric</option><option value="Forge">Forge</option>\n<option value="NeoForge">NeoForge</option><option value="Quilt">Quilt</option><option value="Folia">Folia</option><option value="Arclight">Arclight (hybrid)</option><option value="Velocity">Velocity Proxy</option><option value="BungeeCord">BungeeCord Proxy</option>\n</select>\n<p class="muted" id="softwareDescription">Choose the server platform you want to install.</p>\n<div class="row"><button onclick="nextStep(1)">← Back</button><button onclick="loadLoaderVersions()">Next →</button></div></div>\n<div id="wizard3" class="hidden"><h3>Step 3 — Compatible loader / release</h3>\n<p class="muted" id="loaderDescription">Checking compatible versions...</p>\n<select id="loaderVersion"></select>\n<div class="row"><button onclick="nextStep(2)">← Back</button><button onclick="prepareReview()">Next → RAM</button></div></div>\n<div id="wizard4" class="hidden"><h3>Step 4 — Server RAM allocation</h3>\n<label>Choose the maximum RAM for the Minecraft server</label>\n<select id="memorySelect"><option value="2G">2 GB</option><option value="3G">3 GB</option><option value="4G" selected>4 GB — Recommended</option><option value="5G">5 GB</option><option value="6G">6 GB</option><option value="8G">8 GB</option><option value="10G">10 GB</option><option value="12G">12 GB</option></select>\n<p class="muted">This value controls the Java server maximum heap (-Xmx). Choose according to the available memory on your GitHub Actions runner.</p>\n<div class="row"><button onclick="nextStep(3)">← Back</button><button onclick="prepareFinalReview()">Next → Review</button></div></div>\n<div id="wizard5" class="hidden"><h3>Step 5 — Review and install</h3>\n<div class="card" id="installSummary">Your configuration will appear here.</div>\n<div class="row"><button onclick="nextStep(4)">← Back</button><button onclick="beginInstall()">Install server →</button></div></div>\n<div id="wizardProgress" class="hidden"><h3>Installing server</h3>\n<div class="progress"><div class="bar" id="progressBar"></div></div>\n<div class="big" id="progressPercent">0%</div>\n<p id="progressStage">Preparing...</p><p id="progressError" class="error"></p>\n<h4>Live installer output</h4><pre id="installLog" class="install-log">Waiting for installer output...</pre>\n<button id="finishInstall" class="hidden" onclick="show(\'overview\')">Open dashboard</button>\n</div>\n</div></section>\n\n<section id="console" class="hidden"><h2>Live Console</h2>\n<div class="card"><div class="legend"><span class="log-error">● Errors</span><span class="log-warning">● Warnings</span><span class="log-info">● Info</span></div><div class="consolebox"><pre id="consolelog2"></pre></div><div id="crashdiagnostics2" class="diagnostic"><h4>Crash analysis</h4><p>Waiting for log analysis...</p></div>\n<input id="commandInput2" placeholder="Minecraft command">\n<button onclick="sendCommand2()">Send command</button></div></section>\n\n<section id="players" class="hidden"><h2>Players</h2><div class="card">\n<input id="playername" placeholder="Player name"><div class="row">\n<button onclick="playerAction(\'kick\')">Kick</button>\n<button onclick="playerAction(\'ban\')">Ban</button>\n<button onclick="playerAction(\'pardon\')">Pardon</button>\n<button onclick="playerAction(\'op\')">OP</button>\n<button onclick="playerAction(\'deop\')">Deop</button></div>\n<button onclick="playerAction(\'whitelist_add\')">Whitelist add</button>\n<button onclick="playerAction(\'whitelist_remove\')">Whitelist remove</button>\n</div></section>\n\n<section id="files" class="hidden"><h2>File Manager</h2><div class="card">\n<input id="filePath" placeholder="Relative path, e.g. server.properties">\n<button onclick="browse()">Open / Browse</button><div class="file-toolbar"><button onclick="goParent()">↑ Up</button><button onclick="browse()">↻ Refresh</button><span id="fileCrumb" class="muted">/</span></div><div id="fileList" class="file-list"><p class="muted">Choose a folder to browse files.</p></div>\n<textarea id="fileContent" placeholder="File contents"></textarea>\n<button onclick="saveFile()">Save file</button></div></section>\n\n<section id="plugins" class="hidden"><h2>Plugins</h2><div class="card">\n<input type="file" id="pluginFile"><button onclick="uploadAddon(\'plugins\')">Upload JAR</button>\n<div id="pluginList" class="file-list addon-list"></div><button onclick="listAddons(\'plugins\')">Refresh</button></div></section>\n\n<section id="mods" class="hidden"><h2>Mods</h2><div class="card">\n<input type="file" id="modFile"><button onclick="uploadAddon(\'mods\')">Upload JAR</button>\n<div id="modList" class="file-list addon-list"></div><button onclick="listAddons(\'mods\')">Refresh</button></div></section>\n\n<section id="backups" class="hidden"><h2>Backups</h2><div class="card">\n<button onclick="api(\'/api/backups/create\')">Create backup</button>\n<div id="backupList" class="file-list"></div><button onclick="listBackups()">Refresh</button>\n<input id="restoreName" placeholder="Backup filename">\n<button onclick="restoreBackup()">Restore backup</button></div></section>\n\n<section id="users" class="hidden"><h2>Users & Roles</h2><div class="card">\n<input id="newUsername" placeholder="Username">\n<input id="newPassword" type="password" placeholder="Password (12+ characters)">\n<select id="newRole"><option>Admin</option><option>Moderator</option></select>\n<button onclick="createUser()">Create user</button><div id="userList" class="file-list"></div>\n<button onclick="listUsers()">Refresh</button></div></section>\n\n<section id="monitoring" class="hidden"><h2>Server Monitoring</h2>\n<p class="muted">Live measurements from the Minecraft Java process only · automatic refresh every 2.5 seconds.</p>\n<div class="grid metrics-grid">\n<div class="card metric"><span class="muted">Server CPU</span><div class="big" id="metricCpu">—</div><div class="progress"><div class="bar" id="metricCpuBar"></div></div><small class="metric-note">CPU consumed by the Minecraft process</small></div>\n<div class="card metric"><span class="muted">Server RAM</span><div class="big" id="metricRam">—</div><div class="progress"><div class="bar" id="metricRamBar"></div></div><small class="metric-note">Java process RSS / configured -Xmx (approximate)</small></div>\n<div class="card metric"><span class="muted">Server TPS</span><div class="big" id="metricTps">—</div><div class="progress"><div class="bar" id="metricTpsBar"></div></div><small class="metric-note" id="metricTpsNote">Waiting for server...</small></div>\n<div class="card metric"><span class="muted">Server uptime</span><div class="big" id="metricUptime">—</div></div>\n<div class="card metric"><span class="muted">Server process</span><div class="big" id="metricState">STOPPED</div></div>\n</div>\n<div class="card"><span class="muted">Measurement scope</span><p>These values exclude the host operating system and other processes. When the Minecraft server is stopped, all measurements are suspended and displayed as unavailable.</p></div>\n</section>\n\n<section id="settings" class="hidden"><h2>Settings & Session</h2><div class="card">\n<p>Maximum players: 20</p>\n<button onclick="shutdown()">Shutdown Session</button>\n<button class="danger" onclick="emergency()">Emergency Kill</button>\n<hr><h3>FULL SERVER PURGE</h3>\n<p class="error">Deletes every repository item except files inside .github/workflows. Git history remains intact.</p>\n<input id="purgeText" placeholder="Type PURGE SERVER">\n<button class="danger" onclick="purge()">FULL SERVER PURGE</button>\n</div></section>\n<p id="message"></p></main></div>\n\n<script>let csrf=\'\';\nlet currentFile=\'\';\nlet consoleTimer=null;\nlet dashboardTimer=null;\nlet progressTimer=null;\nlet minecraftLoaded=false;\nlet loaderRequired=false;\n\nasync function readApi(response){\n  const body=await response.text();\n  let data={};\n  try{data=body?JSON.parse(body):{};}\n  catch(e){throw new Error(`Server returned non-JSON response (HTTP ${response.status}): ${body.slice(0,180)}`);}\n  if(!response.ok)throw new Error(data.error||`Request failed (HTTP ${response.status})`);\n  return data;\n}\nasync function call(url,data=null,method=\'POST\'){\n  const options={method,headers:{\'Content-Type\':\'application/json\',\'X-CSRF-Token\':csrf}};\n  if(data!==null)options.body=JSON.stringify(data);\n  return readApi(await fetch(url,options));\n}\nfunction message(t,bad=false){const el=document.getElementById(\'message\');el.textContent=t;el.className=bad?\'error\':\'success\';}\nasync function login(){\n  try{\n    const r=await fetch(\'/api/login\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({username:document.getElementById(\'username\').value,password:document.getElementById(\'password\').value})});\n    const d=await readApi(r);csrf=d.csrf;enterApp();\n  }catch(e){document.getElementById(\'loginmsg\').textContent=e.message;}\n}\nfunction enterApp(){\n  document.getElementById(\'login\').classList.add(\'hidden\');document.getElementById(\'app\').classList.remove(\'hidden\');\n  refreshDashboard();refreshConsole();loadMinecraftVersions();\n  if(dashboardTimer)clearInterval(dashboardTimer);dashboardTimer=setInterval(refreshDashboard,2500);\n  if(consoleTimer)clearInterval(consoleTimer);consoleTimer=setInterval(refreshConsole,4500);\n}\nasync function checkSession(){\n  try{const d=await readApi(await fetch(\'/api/me\'));csrf=d.csrf;enterApp();}\n  catch(e){document.getElementById(\'login\').classList.remove(\'hidden\');}\n}\nasync function logout(){try{await call(\'/api/logout\');}catch(e){}location.reload();}\nfunction show(id){\n  document.querySelectorAll(\'main section\').forEach(x=>x.classList.add(\'hidden\'));\n  document.getElementById(id).classList.remove(\'hidden\');\n  if(id===\'setup\'&&!minecraftLoaded)loadMinecraftVersions();\n  if(id===\'console\')refreshConsole();if(id===\'files\')browse();\n  if(id===\'plugins\'&&addonAllowed(\'plugins\'))listAddons(\'plugins\');if(id===\'mods\'&&addonAllowed(\'mods\'))listAddons(\'mods\');\n  if(id===\'backups\')listBackups();if(id===\'users\')listUsers();\n}\nasync function api(url,data={}){try{const d=await call(url,data);message(d.message||\'Operation completed\');refreshDashboard();}catch(e){message(e.message,true);}}\nfunction addonAllowed(kind){return !document.getElementById(kind===\'plugins\'?\'navPlugins\':\'navMods\').classList.contains(\'hidden\');}\nfunction updateAddonNavigation(categories){\n  document.getElementById(\'navPlugins\').classList.toggle(\'hidden\',!categories.includes(\'plugins\'));\n  document.getElementById(\'navMods\').classList.toggle(\'hidden\',!categories.includes(\'mods\'));\n  if(!categories.includes(\'plugins\')&&document.getElementById(\'plugins\')&&!document.getElementById(\'plugins\').classList.contains(\'hidden\'))show(\'overview\');\n  if(!categories.includes(\'mods\')&&document.getElementById(\'mods\')&&!document.getElementById(\'mods\').classList.contains(\'hidden\'))show(\'overview\');\n}\nfunction renderMetrics(d){\n  const set=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value;};\n  const bar=(id,value)=>{const el=document.getElementById(id);if(el)el.style.width=Math.max(0,Math.min(100,Number(value)||0))+\'%\';};\n  if(!d.running){\n    set(\'metricCpu\',\'—\');set(\'metricRam\',\'—\');set(\'metricTps\',\'—\');\n    set(\'metricTpsNote\',\'Serverul este oprit; măsurătorile sunt suspendate.\');\n    set(\'metricUptime\',\'—\');set(\'metricState\',\'STOPPED\');\n    bar(\'metricCpuBar\',0);bar(\'metricRamBar\',0);bar(\'metricTpsBar\',0);\n    return;\n  }\n  set(\'metricCpu\',d.cpu===null||d.cpu===undefined?\'—\':Number(d.cpu).toFixed(1)+\'%\');\n  bar(\'metricCpuBar\',d.cpu);\n  if(d.ram_used!==null&&d.ram_used!==undefined){\n    set(\'metricRam\',formatMemory(d.ram_used)+\' / \'+formatMemory(d.ram_limit));\n    bar(\'metricRamBar\',d.ram_percent);\n  }else{set(\'metricRam\',\'—\');bar(\'metricRamBar\',0);}\n  if(d.tps!==null&&d.tps!==undefined){\n    set(\'metricTps\',Number(d.tps).toFixed(1)+\' / 20 TPS\');\n    bar(\'metricTpsBar\',Number(d.tps)/20*100);\n    set(\'metricTpsNote\',\'Valoare raportată de comanda TPS a serverului.\');\n  }else{\n    set(\'metricTps\',\'N/A\');bar(\'metricTpsBar\',0);\n    const kind=(d.config&&d.config.type)||\'\';\n    const notes={Fabric:\'TPS necesită Spark instalat ca mod.\',Vanilla:\'Această versiune Vanilla nu a furnizat o valoare TPS.\',Velocity:\'Proxy: nu există TPS de joc pentru acest proces.\',BungeeCord:\'Proxy: nu există TPS de joc pentru acest proces.\'};\n    set(\'metricTpsNote\',notes[kind]||\'Comanda TPS nu a returnat încă o valoare.\');\n  }\n  set(\'metricUptime\',formatDuration(d.uptime));\n  set(\'metricState\',\'RUNNING\');\n}\nfunction formatMemory(gb){gb=Math.max(0,Number(gb)||0);return gb<1?(gb*1024).toFixed(1)+\' MB\':gb.toFixed(2)+\' GB\';}\nfunction formatDuration(seconds){seconds=Math.max(0,Number(seconds)||0);const days=Math.floor(seconds/86400);const hours=Math.floor(seconds%86400/3600);const mins=Math.floor(seconds%3600/60);return (days?days+\'d \':\'\')+hours+\'h \'+mins+\'m\';}\nfunction renderFileCards(target,items,kind){\n  target.replaceChildren();\n  if(!items||!items.length){const empty=document.createElement(\'div\');empty.className=\'file-empty\';empty.textContent=\'No \'+kind+\' found yet.\';target.appendChild(empty);return;}\n  for(const item of items){const card=document.createElement(\'div\');card.className=\'addon-card\';const left=document.createElement(\'div\');const name=document.createElement(\'div\');name.className=\'addon-name\';name.textContent=item.name||item.username||\'Item\';const meta=document.createElement(\'div\');meta.className=\'addon-meta\';meta.textContent=item.role||formatFileSize(item.size||0);left.append(name,meta);card.appendChild(left);target.appendChild(card);}\n}\nasync function refreshDashboard(){\n  if(window.dashboardBusy)return;\n  window.dashboardBusy=true;\n  try{\n    const d=await readApi(await fetch(\'/api/status\'));\n    document.getElementById(\'status\').textContent=d.state===\'starting\'?\'STARTING\':(d.state===\'running\'?\'RUNNING\':\'STOPPED\');\n    document.getElementById(\'software\').textContent=d.config.type||\'-\';\n    document.getElementById(\'version\').textContent=d.config.version||\'-\';\n    const cpuText=d.running&&d.cpu!==null?Number(d.cpu).toFixed(1)+\'%\':\'—\';\n    const ramText=d.running&&d.ram_used!==null?formatMemory(d.ram_used)+\' / \'+formatMemory(d.ram_limit):\'—\';\n    const tpsText=d.state===\'running\'?(d.tps===null||d.tps===undefined?\'N/A\':Number(d.tps).toFixed(1)+\' / 20\'):\'—\';\n    document.getElementById(\'cpu\').textContent=cpuText;\n    document.getElementById(\'ram\').textContent=ramText;\n    document.getElementById(\'overviewTps\').textContent=tpsText;\n    document.getElementById(\'uptime\').textContent=d.running?formatDuration(d.uptime):\'—\';\n    const setBar=(id,value)=>{const el=document.getElementById(id);if(el)el.style.width=Math.max(0,Math.min(100,Number(value)||0))+\'%\';};\n    setBar(\'overviewCpuBar\',d.running?d.cpu:0);\n    setBar(\'overviewRamBar\',d.running?d.ram_percent:0);\n    setBar(\'overviewTpsBar\',d.state===\'running\'&&d.tps!==null?Number(d.tps)/20*100:0);\n    renderMetrics(d);updateAddonNavigation(d.addon_categories||[]);\n  }catch(e){message(e.message,true);}\n  finally{window.dashboardBusy=false;}\n}\nfunction renderConsole(el, text){\n  if(!el)return;\n  if(el.dataset.rawLog===text)return;\n  el.dataset.rawLog=text;\n  const atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<35;\n  el.replaceChildren();\n  const lines=(text||\'Waiting for server output...\').split(\'\\n\');\n  let errorContext=false;\n  for(const line of lines){\n    const span=document.createElement(\'span\');\n    const isError=/\\b(ERROR|SEVERE|FATAL|Exception|Error|CRITICAL)\\b|Caused by:|\\bat [\\w.$]+\\(/i.test(line);\n    const isWarning=/\\b(WARN|WARNING)\\b/i.test(line);\n    if(isError){span.className=\'log-error\';errorContext=true;}\n    else if(isWarning){span.className=\'log-warning\';errorContext=false;}\n    else if(errorContext&&/^\\s*(at |\\.\\.\\. |\\||Caused by:)/.test(line)){span.className=\'log-error\';}\n    else{span.className=\'log-info\';if(/\\b(INFO|DEBUG)\\b/.test(line))errorContext=false;}\n    span.textContent=line+\'\\n\';el.appendChild(span);\n  }\n  if(atBottom)el.scrollTop=el.scrollHeight;\n}\nfunction renderDiagnostics(target,d){\n  if(!target)return;\n  target.replaceChildren();\n  if(!d){\n    const h=document.createElement(\'h4\');h.textContent=\'Crash analysis — inactive\';target.appendChild(h);\n    const p=document.createElement(\'p\');p.textContent=\'Nu există raport de crash. Analiza se activează numai după o închidere neașteptată a procesului Minecraft cu un cod de ieșire diferit de zero.\';target.appendChild(p);\n    return;\n  }\n  const h=document.createElement(\'h4\');h.textContent=\'⚠ \'+d.title;target.appendChild(h);\n  const confidence=document.createElement(\'p\');confidence.textContent=\'Încredere: \'+(d.confidence||\'—\');target.appendChild(confidence);\n  const cause=document.createElement(\'p\');cause.textContent=\'Cauză probabilă: \'+(d.cause||\'—\');target.appendChild(cause);\n  const action=document.createElement(\'p\');action.textContent=\'Recomandare: \'+(d.action||\'—\');target.appendChild(action);\n  const exit=document.createElement(\'p\');exit.textContent=\'Exit code: \'+d.exit_code+\' · Durată sesiune: \'+formatDuration(d.runtime_seconds||0);target.appendChild(exit);\n  if(d.evidence&&d.evidence.length){const pre=document.createElement(\'pre\');pre.textContent=d.evidence.join(\'\\n\');target.appendChild(pre);}\n}\nasync function refreshConsole(){\n  const overviewVisible=!document.getElementById(\'overview\').classList.contains(\'hidden\');\n  const consoleVisible=!document.getElementById(\'console\').classList.contains(\'hidden\');\n  if(!overviewVisible&&!consoleVisible)return;\n  try{\n    const d=await readApi(await fetch(\'/api/console\'));\n    if(overviewVisible){renderConsole(document.getElementById(\'consolelog\'),d.log);renderDiagnostics(document.getElementById(\'crashdiagnostics\'),d.diagnostics);}\n    if(consoleVisible){renderConsole(document.getElementById(\'consolelog2\'),d.log);renderDiagnostics(document.getElementById(\'crashdiagnostics2\'),d.diagnostics);}\n  }catch(e){}\n}\nasync function sendCommandFrom(id){try{await call(\'/api/command\',{command:document.getElementById(id).value});document.getElementById(id).value=\'\';refreshConsole();}catch(e){message(e.message,true);}}\nfunction sendCommand(){sendCommandFrom(\'commandInput\')}function sendCommand2(){sendCommandFrom(\'commandInput2\')}\n\nfunction wizardStep(n){\n  for(let i=1;i<=5;i++)document.getElementById(\'wizard\'+i).classList.toggle(\'hidden\',i!==n);\n  document.getElementById(\'wizardProgress\').classList.add(\'hidden\');\n  document.getElementById(\'stepLabel\').textContent=\'Step \'+n+\' of 5\';\n  document.getElementById(\'stepName\').textContent=[\'\',\'Minecraft version\',\'Server software\',\'Compatible loader / release\',\'Server RAM allocation\',\'Review and install\'][n];\n}\nasync function loadMinecraftVersions(){\n  const select=document.getElementById(\'mcversion\');select.innerHTML=\'<option>Loading versions...</option>\';minecraftLoaded=false;\n  try{const d=await readApi(await fetch(\'/api/catalog/minecraft\'));\n    if(!Array.isArray(d.items)||!d.items.length)throw new Error(\'Mojang did not return any release versions\');\n    select.innerHTML=\'\';d.items.forEach(v=>{const o=document.createElement(\'option\');o.value=v.id;o.textContent=v.id;select.appendChild(o);});minecraftLoaded=true;\n  }catch(e){select.innerHTML=\'<option value="">Versions unavailable — retry</option>\';message(\'Could not load Minecraft versions: \'+e.message,true);}\n}\nfunction nextStep(n){\n  if(n===2&&!document.getElementById(\'mcversion\').value){message(\'Choose a Minecraft version first\',true);return;}\n  if(n>=1&&n<=4)wizardStep(n);\n}\nfunction softwareChanged(){\n  const kind=document.getElementById(\'softwareSelect\').value;\n  const descriptions={Vanilla:\'Official Mojang server — no extra loader.\',Paper:\'Optimized Paper server — stable build selected automatically.\',Fabric:\'Lightweight mod loader. Choose a compatible Fabric loader build.\',Forge:\'Forge mod loader. Only compatible builds are shown.\',NeoForge:\'NeoForge mod loader. Only compatible releases are shown.\',Quilt:\'Quilt mod loader. Choose a compatible Quilt Loader release.\',Folia:\'Regionized multithreaded Paper fork. Stable build selected automatically.\',Arclight:\'Hybrid server: supports Bukkit/Paper plugins together with its compatible mod loader build.\',Velocity:\'Modern Minecraft proxy. Choose a stable Velocity release.\',BungeeCord:\'Minecraft proxy. Select a successful BungeeCord CI build.\'};\n  document.getElementById(\'softwareDescription\').textContent=descriptions[kind]||\'\';\n}\nasync function loadLoaderVersions(){\n  const kind=document.getElementById(\'softwareSelect\').value,mc=document.getElementById(\'mcversion\').value;\n  if(!mc){message(\'Choose a Minecraft version first\',true);wizardStep(1);return;}\n  const select=document.getElementById(\'loaderVersion\');select.innerHTML=\'<option>Loading compatible releases...</option>\';\n  document.getElementById(\'loaderDescription\').textContent=\'Checking \'+kind+\' compatibility for Minecraft \'+mc+\'...\';\n  loaderRequired=[\'Fabric\',\'Forge\',\'NeoForge\',\'Velocity\',\'Quilt\',\'Arclight\',\'BungeeCord\'].includes(kind);\n  wizardStep(3);\n  if(!loaderRequired){select.innerHTML=\'<option value="">Not required</option>\';document.getElementById(\'loaderDescription\').textContent=kind===\'Paper\'||kind===\'Folia\'?kind+\' automatically installs the matching stable build for Minecraft \'+mc+\'.\':\'Vanilla uses the official Mojang server JAR.\';return;}\n  try{\n    const endpoint=kind.toLowerCase();const url=\'/api/catalog/\'+endpoint+(kind===\'Velocity\'||kind===\'BungeeCord\'?\'\':\'?minecraft=\'+encodeURIComponent(mc));\n    const d=await readApi(await fetch(url));const items=Array.isArray(d.items)?d.items:[];\n    if(!items.length)throw new Error(\'No compatible \'+kind+\' releases were returned for this selection\');\n    select.innerHTML=\'\';items.forEach(item=>{const id=typeof item===\'string\'?item:item.id;if(!id)return;const o=document.createElement(\'option\');o.value=id;o.textContent=id+(item.stable===false?\' (unstable)\':\'\');select.appendChild(o);});\n    if(!select.options.length)throw new Error(\'The version list contained no usable entries\');\n    document.getElementById(\'loaderDescription\').textContent=kind+\' releases compatible with \'+(kind===\'Velocity\'?\'the proxy installation\':\'Minecraft \'+mc)+\'.\';\n  }catch(e){select.innerHTML=\'<option value="">Could not load compatible releases</option>\';document.getElementById(\'loaderDescription\').textContent=e.message;message(e.message,true);}\n}\nfunction prepareReview(){\n  const kind=document.getElementById(\'softwareSelect\').value,mc=document.getElementById(\'mcversion\').value;\n  const loader=loaderRequired?document.getElementById(\'loaderVersion\').value:\'\';\n  if(loaderRequired&&!loader){message(\'Choose a compatible release before continuing\',true);wizardStep(3);return;}\n  document.getElementById(\'installSummary\').innerHTML=\'<b>Minecraft:</b> \'+mc+\'<br><b>Software:</b> \'+kind+\'<br><b>Loader / release:</b> \'+(loader||\'Not required\')+\'<br><br>Press Install to download and configure the server.\';\n  wizardStep(4);\n}\nfunction prepareFinalReview(){\n  const kind=document.getElementById(\'softwareSelect\').value,mc=document.getElementById(\'mcversion\').value;\n  const loader=loaderRequired?document.getElementById(\'loaderVersion\').value:\'\';\n  const memory=document.getElementById(\'memorySelect\').value;\n  document.getElementById(\'installSummary\').innerHTML=\'<b>Minecraft:</b> \'+mc+\'<br><b>Software:</b> \'+kind+\'<br><b>Loader / release:</b> \'+(loader||\'Not required\')+\'<br><b>Server RAM:</b> \'+memory+\'<br><br>Press Install to download and configure the server.\';\n  wizardStep(5);\n}\nasync function beginInstall(){\n  const kind=document.getElementById(\'softwareSelect\').value;\n  const data={minecraft:document.getElementById(\'mcversion\').value,software:kind,loader:loaderRequired?document.getElementById(\'loaderVersion\').value:\'\',memory:document.getElementById(\'memorySelect\').value};\n  if(!data.minecraft||([\'Fabric\',\'Forge\',\'NeoForge\',\'Velocity\',\'Quilt\',\'Arclight\',\'BungeeCord\'].includes(kind)&&!data.loader)){message(\'Complete all required wizard selections first\',true);return;}\n  try{\n    await call(\'/api/install\',data);\n    for(let i=1;i<=5;i++)document.getElementById(\'wizard\'+i).classList.add(\'hidden\');\n    document.getElementById(\'wizardProgress\').classList.remove(\'hidden\');document.getElementById(\'progressError\').textContent=\'\';\n    document.getElementById(\'finishInstall\').classList.add(\'hidden\');document.getElementById(\'progressBar\').style.width=\'1%\';\n    document.getElementById(\'progressPercent\').textContent=\'1%\';document.getElementById(\'progressStage\').textContent=\'Starting installation...\';document.getElementById(\'installLog\').textContent=\'Connecting to installer...\';\n    if(progressTimer)clearInterval(progressTimer);progressTimer=setInterval(checkInstallProgress,700);checkInstallProgress();\n  }catch(e){message(e.message,true);}\n}\nasync function checkInstallProgress(){\n  try{\n    const d=await readApi(await fetch(\'/api/install/status\'));\n    document.getElementById(\'progressBar\').style.width=d.percent+\'%\';\n    document.getElementById(\'progressPercent\').textContent=d.percent+\'%\';\n    document.getElementById(\'progressStage\').textContent=d.stage||\'Working...\';\n    const log=document.getElementById(\'installLog\');\n    if(log&&Array.isArray(d.logs)){\n      const text=d.logs.join(\'\\n\');\n      if(log.textContent!==text){const atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<45;log.textContent=text;if(atBottom)log.scrollTop=log.scrollHeight;}\n    }\n    if(d.error){document.getElementById(\'progressError\').textContent=\'Installation failed: \'+d.error;clearInterval(progressTimer);return;}\n    if(d.done&&d.percent===100){clearInterval(progressTimer);document.getElementById(\'progressStage\').textContent=\'Installation complete!\';document.getElementById(\'finishInstall\').classList.remove(\'hidden\');refreshDashboard();}\n  }catch(e){document.getElementById(\'progressError\').textContent=\'Progress check failed: \'+e.message;}\n}\nfunction formatFileSize(n){if(!n)return \'—\';const u=[\'B\',\'KB\',\'MB\',\'GB\'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+\' \'+u[i];}\nfunction goParent(){const p=filePath.value.replace(/\\\\/g,\'/\').replace(/\\/$/,\'\');filePath.value=p.includes(\'/\')?p.slice(0,p.lastIndexOf(\'/\')):\'\';browse();}\nasync function openFileEntry(name,isDir){const base=filePath.value.replace(/\\/$/,\'\');filePath.value=base?base+\'/\'+name:name;await browse();}\nasync function browse(){\n  try{\n    const p=filePath.value.trim().replace(/^\\/+|\\/+$/g,\'\');\n    const d=await readApi(await fetch(\'/api/files?path=\'+encodeURIComponent(p)));\n    currentFile=p;const list=document.getElementById(\'fileList\');list.replaceChildren();\n    document.getElementById(\'fileCrumb\').textContent=\'/\'+p;\n    if(d.type===\'file\'){fileContent.value=d.content;const note=document.createElement(\'p\');note.className=\'file-empty\';note.textContent=\'Opened: \'+p+\' — edit below and press Save file.\';list.appendChild(note);return;}\n    fileContent.value=\'\';\n    if(p){const row=document.createElement(\'div\');row.className=\'file-entry\';const up=document.createElement(\'button\');up.textContent=\'📁 ..\';up.onclick=goParent;row.appendChild(up);list.appendChild(row);}\n    for(const entry of (d.entries||[])){\n      const row=document.createElement(\'div\');row.className=\'file-entry\';\n      const name=document.createElement(\'button\');name.textContent=(entry.directory?\'📁 \':\'📄 \')+entry.name;name.onclick=()=>openFileEntry(entry.name,entry.directory);\n      const size=document.createElement(\'span\');size.className=\'file-size\';size.textContent=entry.directory?\'Folder\':formatFileSize(entry.size);\n      const action=document.createElement(\'button\');action.textContent=entry.directory?\'Open\':\'Edit\';action.onclick=()=>openFileEntry(entry.name,entry.directory);\n      row.append(name,size,action);list.appendChild(row);\n    }\n    if(!(d.entries||[]).length){const empty=document.createElement(\'div\');empty.className=\'file-empty\';empty.textContent=\'This folder is empty.\';list.appendChild(empty);}\n  }catch(e){message(\'File Explorer: \'+e.message,true);}\n}\nasync function saveFile(){\n  try{await call(\'/api/files/save\',{path:currentFile,content:fileContent.value});message(\'File saved\');}\n  catch(e){message(e.message,true);}\n}\nasync function playerAction(action){\n  try{await call(\'/api/player\',{action,name:playername.value});message(\'Player command sent\');}\n  catch(e){message(e.message,true);}\n}\nasync function listAddons(kind){\n  if(!addonAllowed(kind))return;\n  const d=await readApi(await fetch(\'/api/addons?type=\'+kind));\n  renderFileCards(document.getElementById(kind===\'plugins\'?\'pluginList\':\'modList\'),d.files,kind);\n}\nasync function uploadAddon(kind){\n  try{\n    const input=document.getElementById(kind===\'plugins\'?\'pluginFile\':\'modFile\');\n    const file=input.files[0];if(!file)throw new Error(\'Choose a JAR file\');\n    const form=new FormData();form.append(\'file\',file);form.append(\'type\',kind);\n    const r=await fetch(\'/api/addons/upload\',{method:\'POST\',headers:{\'X-CSRF-Token\':csrf},body:form});\n    const d=await readApi(r);\n    message(\'Upload complete\');listAddons(kind);\n  }catch(e){message(e.message,true);}\n}\nasync function listBackups(){\n  const d=await readApi(await fetch(\'/api/backups\'));\n  renderFileCards(document.getElementById(\'backupList\'),d.items.map(x=>({name:x.name,size:x.size})), \'backups\');\n}\nasync function restoreBackup(){\n  if(!confirm(\'Replace server files with this backup?\'))return;\n  try{await call(\'/api/backups/restore\',{name:restoreName.value});message(\'Backup restored\');}\n  catch(e){message(e.message,true);}\n}\nasync function listUsers(){\n  const d=await readApi(await fetch(\'/api/users\'));\n  renderFileCards(document.getElementById(\'userList\'),d.items, \'users\');\n}\nasync function createUser(){\n  try{\n    await call(\'/api/users\',{username:newUsername.value,password:newPassword.value,role:newRole.value});\n    message(\'User created\');listUsers();\n  }catch(e){message(e.message,true);}\n}\nasync function shutdown(){\n  if(confirm(\'Gracefully stop the server and end this session?\'))await api(\'/api/shutdown\');\n}\nasync function emergency(){\n  if(confirm(\'Force kill the server. World saving is NOT guaranteed. Continue?\'))await api(\'/api/emergency\');\n}\nasync function purge(){\n  if(!confirm(\'This permanently deletes hosting data from the current branch. Continue?\'))return;\n  try{await call(\'/api/purge\',{confirmation:purgeText.value});message(\'Purge requested\');}\n  catch(e){message(e.message,true);}\n}\nwindow.addEventListener(\'load\',checkSession);\n</script></body></html>\n'
+        if __name__ == '__main__':
+            app.run(host='127.0.0.1', port=8080, threaded=True)
+        PY
+    - name: Start dashboard
+      shell: bash
+      run: |
+        nohup .venv/bin/python app.py > logs/dashboard.log 2>&1 &
+        echo $! > runtime/dashboard.pid
+        for i in $(seq 1 60); do
+          if curl -fsS http://127.0.0.1:8080/ >/dev/null; then
+            echo "Dashboard ready."
+            exit 0
+          fi
+          sleep 2
+        done
+        cat logs/dashboard.log
+        exit 1
+    - name: Start Cloudflare Quick Tunnel
+      shell: bash
+      run: |
+        curl -L --fail --retry 3 \
+          https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+          -o cloudflared
+        chmod +x cloudflared
+        nohup ./cloudflared tunnel --url http://127.0.0.1:8080 --no-autoupdate \
+          > logs/cloudflared.log 2>&1 &
+        echo $! > runtime/cloudflared.pid
+
+        URL=""
+        for i in $(seq 1 60); do
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' logs/cloudflared.log | head -n 1 || true)
+          [ -n "$URL" ] && break
+          sleep 2
+        done
+        if [ -z "$URL" ]; then
+          cat logs/cloudflared.log
+          exit 1
+        fi
+
+        echo "DASHBOARD URL: $URL"
+        echo "OWNER PASSWORD: $OWNER_PASSWORD"
+        echo "MINECRAFT JAVA SERVER ADDRESS: $MINECRAFT_ADDRESS"
+    - name: Hosting session
+      shell: bash
+      run: |
+        END=$(( $(date +%s) + SESSION_MINUTES * 60 ))
+        echo "Session active for $SESSION_MINUTES minutes."
+        while [ "$(date +%s)" -lt "$END" ]; do
+          [ -f runtime/shutdown.flag ] && break
+          [ -f runtime/emergency.flag ] && break
+          [ -f runtime/purge.flag ] && break
+          sleep 5
+        done
+        echo "Session finished."
+    - name: Stop hosting services
+      if: always()
+      shell: bash
+      run: |
+        if [ -f runtime/umn-agent.pid ]; then
+          touch runtime/umn-stop.flag
+          for i in $(seq 1 5); do
+            kill -0 "$(cat runtime/umn-agent.pid)" 2>/dev/null || break
+            sleep 1
+          done
+          kill "$(cat runtime/umn-agent.pid)" 2>/dev/null || true
+        fi
+        if [ -f runtime/server.pid ]; then
+          SERVER_PID="$(cat runtime/server.pid)"
+          if [[ "$SERVER_PID" =~ ^[0-9]+$ ]]; then
+            kill -TERM -- "-$SERVER_PID" 2>/dev/null || true
+            for i in $(seq 1 10); do
+              kill -0 "$SERVER_PID" 2>/dev/null || break
+              sleep 1
+            done
+            kill -KILL -- "-$SERVER_PID" 2>/dev/null || true
+          fi
+        fi
+        if [ -f runtime/cloudflared.pid ]; then
+          kill "$(cat runtime/cloudflared.pid)" 2>/dev/null || true
+        fi
+        if [ -f runtime/bore.pid ]; then
+          BORE_PID="$(cat runtime/bore.pid)"
+          if [[ "$BORE_PID" =~ ^[0-9]+$ ]]; then
+            kill "$BORE_PID" 2>/dev/null || true
+          fi
+        fi
+        if [ -f runtime/dashboard.pid ]; then
+          kill "$(cat runtime/dashboard.pid)" 2>/dev/null || true
+        fi
+        pkill -f 'cloudflared tunnel' 2>/dev/null || true
+        pkill -f 'python app.py' 2>/dev/null || true
+    - name: FULL SERVER PURGE
+      id: full_purge
+      if: always()
+      shell: bash
+      run: |
+        if [ ! -f runtime/purge.flag ]; then
+          echo "performed=false" >> "$GITHUB_OUTPUT"
+          echo "Purge not requested."
+          exit 0
+        fi
+
+        echo "performed=true" >> "$GITHUB_OUTPUT"
+        touch "$RUNNER_TEMP/minecraft-hosting-full-purge"
+        python - <<'PY'
+        from pathlib import Path
+        import shutil
+        root = Path.cwd()
+        # Preserve Git metadata, the complete .github folder, README files and LICENSE files.
+        for item in list(root.iterdir()):
+            upper = item.name.upper()
+            if item.name in ('.git', '.github'):
+                continue
+            if upper.startswith('README') or upper == 'LICENSE' or upper.startswith('LICENSE.'):
+                continue
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item)
+            else:
+                item.unlink(missing_ok=True)
+        PY
+
+        git config user.name "Minecraft Hosting"
+        git config user.email "minecraft-hosting@users.noreply.github.com"
+        git add -A
+        if ! git diff --cached --quiet; then
+          git commit -m "FULL SERVER PURGE - preserve README, LICENSE and .github"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+        else
+          echo "Repository already contains only workflow files."
+        fi
+    - name: Persist server data
+      if: always() && !cancelled()
+      shell: bash
+      run: |
+        if [ -f "$RUNNER_TEMP/minecraft-hosting-full-purge" ]; then
+          echo "Full purge performed; skipping normal persistence."
+          exit 0
+        fi
+        if [ -f runtime/purge.flag ]; then
+          echo "Purge performed; skipping normal persistence."
+          exit 0
+        fi
+        git config user.name "Minecraft Hosting"
+        git config user.email "minecraft-hosting@users.noreply.github.com"
+        for path in server-data backups; do
+          if [ -e "$path" ]; then
+            git add -A -- "$path"
+          fi
+        done
+        if [ -d runtime ]; then
+          git add -u -- runtime 2>/dev/null || true
+        fi
+        [ ! -f runtime/users.json ] || git add -f runtime/users.json
+        [ ! -f runtime/server.json ] || git add -f runtime/server.json
+        if ! git diff --cached --quiet; then
+          git commit -m "Save Minecraft hosting session data"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+        else
+          echo "No session data changes to persist."
+        fi
+    - name: Export session files
+      if: always() && !cancelled() && steps.full_purge.outputs.performed != 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: minecraft-hosting-session
+        path: |
+          server-data/
+          backups/
+          logs/
+        retention-days: 7
+        if-no-files-found: ignore
