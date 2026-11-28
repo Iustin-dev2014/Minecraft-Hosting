@@ -1380,6 +1380,8 @@ Have fun, explore, build, and create amazing Minecraft experiences!
 **Happy Crafting!** 
 
 
-## UMN Gateway security model
+## UMN Gateway and fork-safe Tailscale security model
 
-Forks call the central V1.19 reusable workflow and authenticate to the temporary UMN Gateway using GitHub Actions OIDC. The Gateway accepts only tokens whose `job_workflow_ref` identifies the approved central reusable workflow. The GitHub App private key stays in the private Admin repository; no fork needs an App secret or installation. Existing Tailscale OIDC variables are still required for private instance registration and `umn.internal` DNS access. See the Admin repository's `docs/REUSABLE-WORKFLOW.md` for setup.
+Forks call the central V1.19 reusable workflow and authenticate to both the temporary UMN Gateway and the Tailscale network using GitHub Actions OIDC. The Gateway and Tailscale federation accept only tokens whose `job_workflow_ref` identifies the approved central reusable workflow. The manual Start workflow in this repository is a thin dispatcher to that same reusable workflow, so it uses the same restricted identity.
+
+The GitHub App private key and Admin OAuth secret stay in the private Admin repository. The Tailscale federated Client ID and Audience are public identifiers stored once as Actions Variables in that private Admin repository; the Admin workflow publishes them in `umn-gateway.json`. Forks and caller repositories need no Tailscale secrets or variables. See the Admin repository's `docs/TAILSCALE-SETUP.md` and `docs/REUSABLE-WORKFLOW.md` for setup.
