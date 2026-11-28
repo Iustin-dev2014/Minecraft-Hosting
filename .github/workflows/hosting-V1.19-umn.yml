@@ -307,7 +307,12 @@ jobs:
                 echo "[UMN] Admin is not accepting registration yet; retrying in background."
               fi
             else
-              if ! curl -fsS --connect-timeout 4 --max-time 8 -X POST "http://$ADMIN_IP:8787/api/v1/heartbeat" -H "Content-Type: application/json" -d "$PAYLOAD" >/dev/null 2>&1; then
+              HTTP_CODE="$(curl -sS --connect-timeout 4 --max-time 8 -o /tmp/umn-heartbeat-response.json -w "%{http_code}" -X POST "http://$ADMIN_IP:8787/api/v1/heartbeat" -H "Content-Type: application/json" -d "$PAYLOAD" 2>/dev/null || true)"
+              if [ "$HTTP_CODE" = "403" ] && grep -q '"revoked"' /tmp/umn-heartbeat-response.json 2>/dev/null; then
+                echo "[UMN] This instance has been revoked by Super Admin. Stopping Minecraft session."
+                touch runtime/shutdown.flag runtime/umn-stop.flag
+                break
+              elif [ "$HTTP_CODE" != "200" ]; then
                 REGISTERED=0
                 rm -f runtime/umn-registered
                 echo "[UMN] Admin heartbeat failed; registration will be retried."
