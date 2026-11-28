@@ -63,19 +63,19 @@ jobs:
     - name: UMN - Identify GitHub account, repository and instance
       shell: bash
       env:
-        GH_TOKEN: \${{ github.token }}
-        UMN_ACCOUNT_LOGIN: \${{ github.repository_owner }}
-        UMN_ACCOUNT_ID: \${{ github.repository_owner_id }}
-        UMN_ACTOR_LOGIN: \${{ github.actor }}
-        UMN_ACTOR_ID: \${{ github.actor_id }}
-        UMN_REPOSITORY: \${{ github.repository }}
-        UMN_REPOSITORY_ID: \${{ github.repository_id }}
-        UMN_WORKFLOW: \${{ github.workflow }}
-        UMN_WORKFLOW_REF: \${{ github.workflow_ref }}
-        UMN_REF: \${{ github.ref }}
-        UMN_SHA: \${{ github.sha }}
-        UMN_EVENT_NAME: \${{ github.event_name }}
-        UMN_JAVA_VERSION: \${{ inputs.java_version }}
+        GH_TOKEN: ${{ github.token }}
+        UMN_ACCOUNT_LOGIN: ${{ github.repository_owner }}
+        UMN_ACCOUNT_ID: ${{ github.repository_owner_id }}
+        UMN_ACTOR_LOGIN: ${{ github.actor }}
+        UMN_ACTOR_ID: ${{ github.actor_id }}
+        UMN_REPOSITORY: ${{ github.repository }}
+        UMN_REPOSITORY_ID: ${{ github.repository_id }}
+        UMN_WORKFLOW: ${{ github.workflow }}
+        UMN_WORKFLOW_REF: ${{ github.workflow_ref }}
+        UMN_REF: ${{ github.ref }}
+        UMN_SHA: ${{ github.sha }}
+        UMN_EVENT_NAME: ${{ github.event_name }}
+        UMN_JAVA_VERSION: ${{ inputs.java_version }}
       run: |
         set -euo pipefail
         mkdir -p logs runtime
@@ -132,15 +132,15 @@ jobs:
         .venv/bin/pip install --upgrade pip
         .venv/bin/pip install flask psutil requests
     - name: UMN - Connect this instance to the private Tailscale network
-      if: \${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
+      if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
       uses: tailscale/github-action@v4
       with:
-        oauth-client-id: \${{ inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID }}
-        audience: \${{ inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE }}
+        oauth-client-id: ${{ inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID }}
+        audience: ${{ inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE }}
         tags: tag:umn-instance
         version: latest
     - name: UMN - Explain disabled private registration
-      if: \${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) == '' || (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) == '' }}
+      if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) == '' || (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) == '' }}
       shell: bash
       run: |
         echo "::warning::UMN Tailscale OIDC is not configured. Minecraft will continue, but this run cannot register with UMN. See the Admin repository TAILSCALE-SETUP.md."
@@ -195,22 +195,22 @@ jobs:
         echo "The public port is temporary and changes on each workflow run."
         echo "============================================================"
     - name: UMN - Register instance and keep background heartbeat active
-      if: \${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
+      if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
       shell: bash
       env:
-        UMN_ACCOUNT_LOGIN: \${{ env.UMN_ACCOUNT_LOGIN }}
-        UMN_ACCOUNT_ID: \${{ env.UMN_ACCOUNT_ID }}
-        UMN_ACTOR_LOGIN: \${{ env.UMN_ACTOR_LOGIN }}
-        UMN_ACTOR_ID: \${{ env.UMN_ACTOR_ID }}
-        UMN_REPOSITORY: \${{ env.UMN_REPOSITORY }}
-        UMN_REPOSITORY_ID: \${{ env.UMN_REPOSITORY_ID }}
-        UMN_INSTANCE_ID: \${{ env.UMN_INSTANCE_ID }}
-        UMN_WORKFLOW: \${{ env.UMN_WORKFLOW }}
-        UMN_WORKFLOW_REF: \${{ env.UMN_WORKFLOW_REF }}
-        UMN_REF: \${{ env.UMN_REF }}
-        UMN_SHA: \${{ env.UMN_SHA }}
-        UMN_EVENT_NAME: \${{ env.UMN_EVENT_NAME }}
-        UMN_JAVA_VERSION: \${{ env.UMN_JAVA_VERSION }}
+        UMN_ACCOUNT_LOGIN: ${{ env.UMN_ACCOUNT_LOGIN }}
+        UMN_ACCOUNT_ID: ${{ env.UMN_ACCOUNT_ID }}
+        UMN_ACTOR_LOGIN: ${{ env.UMN_ACTOR_LOGIN }}
+        UMN_ACTOR_ID: ${{ env.UMN_ACTOR_ID }}
+        UMN_REPOSITORY: ${{ env.UMN_REPOSITORY }}
+        UMN_REPOSITORY_ID: ${{ env.UMN_REPOSITORY_ID }}
+        UMN_INSTANCE_ID: ${{ env.UMN_INSTANCE_ID }}
+        UMN_WORKFLOW: ${{ env.UMN_WORKFLOW }}
+        UMN_WORKFLOW_REF: ${{ env.UMN_WORKFLOW_REF }}
+        UMN_REF: ${{ env.UMN_REF }}
+        UMN_SHA: ${{ env.UMN_SHA }}
+        UMN_EVENT_NAME: ${{ env.UMN_EVENT_NAME }}
+        UMN_JAVA_VERSION: ${{ env.UMN_JAVA_VERSION }}
       run: |
         set -euo pipefail
         rm -f runtime/umn-registered runtime/umn-stop.flag
