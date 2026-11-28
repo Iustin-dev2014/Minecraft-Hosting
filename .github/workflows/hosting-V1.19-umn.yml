@@ -279,10 +279,10 @@ jobs:
         admin = os.environ["ADMIN_IP"]
         instance = os.environ["UMN_INSTANCE_ID"]
         token = os.environ["UMN_LOCAL_CONTROL_TOKEN"]
-        def call(url, method="GET", body=None, headers=None):
+        def call(url, method="GET", body=None, headers=None, timeout=6):
             data = None if body is None else json.dumps(body).encode()
             req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-            with urllib.request.urlopen(req, timeout=6) as response:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
                 raw = response.read()
                 return json.loads(raw) if raw else {}
         try:
@@ -295,7 +295,7 @@ jobs:
                     result = call("http://127.0.0.1:8080/api/umn-control", "POST", payload, {
                         "Content-Type": "application/json",
                         "X-UMN-Control-Token": token
-                    })
+                    }, timeout=90)
                     if action == "stop":
                         open("runtime/umn-server-stopped", "w").write("1")
                     call(f"http://{admin}:8787/api/v1/commands/result", "POST", {
