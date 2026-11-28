@@ -270,7 +270,7 @@ jobs:
         chmod 0755 runtime/umn-agent.sh
         nohup bash runtime/umn-agent.sh >> logs/umn-agent.log 2>&1 &
         echo $! > runtime/umn-agent.pid
-        for attempt in $(seq 1 12); do
+        for attempt in $(seq 1 25); do
           if [ -f runtime/umn-registered ]; then
             echo "============================================================"
             echo "[UMN] REGISTRATION COMPLETED SUCCESSFULLY"
