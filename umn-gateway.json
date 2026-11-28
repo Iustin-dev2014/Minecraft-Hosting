@@ -1,10 +1,10 @@
 {
-  "gateway_url": "https://jane-trivia-anything-sheets.trycloudflare.com",
+  "gateway_url": "https://pacific-charged-setup-regular.trycloudflare.com",
   "audience": "umn-gateway",
   "workflow": "Iustin-dev2014/Minecraft-Hosting/.github/workflows/hosting-V1.19-umn.yml@refs/heads/main",
   "tailscale": {
     "client_id": "TtSot4uEY921CNTRL-k7wosMABUe11CNTRL",
     "audience": "api.tailscale.com/TtSot4uEY921CNTRL-k7wosMABUe11CNTRL"
   },
-  "updated_at": "2026-11-28T16:33:20.736Z"
+  "updated_at": "2026-11-28T16:34:19.643Z"
 }
