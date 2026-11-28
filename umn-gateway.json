@@ -1,10 +1,10 @@
 {
-  "gateway_url": "https://commitment-website-gmbh-guests.trycloudflare.com",
+  "gateway_url": "https://duties-environment-alternatives-creek.trycloudflare.com",
   "audience": "umn-gateway",
   "workflow": "Iustin-dev2014/Minecraft-Hosting/.github/workflows/hosting-V1.19-umn.yml@refs/heads/main",
   "tailscale": {
     "client_id": "",
     "audience": ""
   },
-  "updated_at": "2026-11-28T15:41:33.112Z"
+  "updated_at": "2026-11-28T15:43:43.234Z"
 }
