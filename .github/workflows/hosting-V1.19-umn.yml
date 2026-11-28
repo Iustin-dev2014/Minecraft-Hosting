@@ -275,6 +275,10 @@ jobs:
             echo "============================================================"
             echo "[UMN] REGISTRATION COMPLETED SUCCESSFULLY"
             echo "[UMN] Instance: $UMN_INSTANCE_ID"
+            if [ -f /tmp/umn-register-response.json ]; then
+              UMN_DNS_NAME="$(python3 -c 'import json; print(json.load(open("/tmp/umn-register-response.json"))["dns_name"])' 2>/dev/null || true)"
+              [ -z "$UMN_DNS_NAME" ] || echo "[UMN] Private DNS: $UMN_DNS_NAME"
+            fi
             echo "[UMN] Admin acknowledged this instance."
             echo "[UMN] Continuing Minecraft startup in 2 seconds..."
             echo "============================================================"
