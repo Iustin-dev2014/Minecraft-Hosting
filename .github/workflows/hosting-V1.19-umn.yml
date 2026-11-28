@@ -1560,6 +1560,10 @@ jobs:
                 if action == 'stop':
                     stop_server()
                     return jsonify(ok=True, result='Minecraft server stopped')
+                if action == 'end_session':
+                    stop_server()
+                    (RUNTIME / 'shutdown.flag').touch()
+                    return jsonify(ok=True, result='Minecraft runner session ending')
                 if action == 'restart':
                     stop_server()
                     time.sleep(2)
