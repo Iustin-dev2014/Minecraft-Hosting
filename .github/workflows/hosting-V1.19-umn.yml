@@ -41,6 +41,9 @@ name: Minecraft Hosting - Ultimate Edition V1.19 (UMN Network + Bore + Colorful 
         type: string
         required: false
         default: ''
+    secrets:
+      UMN_GH_APP_PRIVATE_KEY:
+        required: false
 permissions:
   contents: write
   id-token: write
@@ -137,6 +140,60 @@ jobs:
         python -m venv .venv
         .venv/bin/pip install --upgrade pip
         .venv/bin/pip install flask psutil requests
+    - name: UMN - Check optional cross-repository Admin dispatch credentials
+      id: umn-app-config
+      shell: bash
+      env:
+        APP_ID: ${{ vars.UMN_GH_APP_ID }}
+        APP_PRIVATE_KEY: ${{ secrets.UMN_GH_APP_PRIVATE_KEY }}
+      run: |
+        if [ -n "$APP_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::UMN GitHub App is not configured. If Admin is offline, start UMN Admin Node manually; registration will keep retrying."
+        fi
+    - name: UMN - Create scoped GitHub App token for Admin repository
+      if: ${{ steps.umn-app-config.outputs.enabled == 'true' }}
+      id: umn-app-token
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ vars.UMN_GH_APP_ID }}
+        private-key: ${{ secrets.UMN_GH_APP_PRIVATE_KEY }}
+        owner: Iustin-dev2014
+        repositories: Admin
+        permission-actions: write
+    - name: UMN - Automatically start Admin Node when needed
+      if: ${{ steps.umn-app-config.outputs.enabled == 'true' }}
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ steps.umn-app-token.outputs.token }}
+        script: |
+          const owner = 'Iustin-dev2014';
+          const repo = 'Admin';
+          const workflow_id = 'umn-admin-node.yml';
+          const { data } = await github.rest.actions.listWorkflowRuns({
+            owner,
+            repo,
+            workflow_id,
+            per_page: 50
+          });
+          const active = data.workflow_runs.find(run =>
+            ['queued', 'in_progress', 'requested', 'waiting'].includes(run.status)
+          );
+          if (active) {
+            core.info(`UMN Admin Node already active: run #${active.run_number} (${active.status}).`);
+            return;
+          }
+          await github.rest.actions.createWorkflowDispatch({
+            owner,
+            repo,
+            workflow_id,
+            ref: 'main',
+            inputs: { service_minutes: '340' }
+          });
+          core.notice('UMN Admin Node was automatically started for this Minecraft instance.');
+
     - name: UMN - Connect this instance to the private Tailscale network
       if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
       uses: tailscale/github-action@v4
