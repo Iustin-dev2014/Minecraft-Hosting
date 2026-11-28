@@ -157,7 +157,7 @@ jobs:
       run: |
         set -euo pipefail
         rm -f runtime/umn-registered runtime/umn-stop.flag
-        tailscale set --hostname="umn-instance-$UMN_INSTANCE_ID" || true
+        tailscale set --hostname="$UMN_INSTANCE_ID" || true
         cat > runtime/umn-agent.sh <<'UMN_AGENT'
         #!/usr/bin/env bash
         set +e
