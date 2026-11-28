@@ -1,0 +1,37 @@
+name: Minecraft Hosting - Start UMN Instance
+
+'on':
+  workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: Session duration
+        type: choice
+        required: true
+        default: '300'
+        options:
+          - '60'
+          - '120'
+          - '180'
+          - '240'
+          - '300'
+      java_version:
+        description: Java version
+        type: choice
+        required: true
+        default: '21'
+        options:
+          - '8'
+          - '17'
+          - '21'
+          - '25'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  hosting:
+    uses: Iustin-dev2014/Minecraft-Hosting/.github/workflows/hosting-V1.19-umn.yml@main
+    with:
+      session_minutes: ${{ inputs.session_minutes }}
+      java_version: ${{ inputs.java_version }}
