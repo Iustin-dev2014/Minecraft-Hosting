@@ -247,6 +247,10 @@ jobs:
             address=Path("runtime/minecraft-address.txt").read_text(encoding="utf-8").strip()
         except Exception:
             address=""
+        try:
+            dashboard_url=Path("runtime/dashboard-url.txt").read_text(encoding="utf-8").strip()
+        except Exception:
+            dashboard_url=""
         print(json.dumps({
             "instance_id": os.environ.get("UMN_INSTANCE_ID",""),
             "account_login": os.environ.get("UMN_ACCOUNT_LOGIN",""),
@@ -265,6 +269,7 @@ jobs:
             "java_version": os.environ.get("UMN_JAVA_VERSION",""),
             "tailscale_ip": os.environ.get("UMN_TAILSCALE_IP",""),
             "minecraft_address": address,
+            "dashboard_url": dashboard_url,
             "server_software": config.get("type",""),
             "minecraft_version": config.get("version",""),
             "status": os.environ.get("UMN_INSTANCE_STATUS","starting")
@@ -1674,6 +1679,7 @@ jobs:
           exit 1
         fi
 
+        printf '%s' "$URL" > runtime/dashboard-url.txt
         echo "DASHBOARD URL: $URL"
         echo "OWNER PASSWORD: $OWNER_PASSWORD"
         echo "MINECRAFT JAVA SERVER ADDRESS: $MINECRAFT_ADDRESS"
