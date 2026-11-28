@@ -79,6 +79,11 @@ jobs:
       run: |
         set -euo pipefail
         mkdir -p logs runtime
+        UMN_ACCOUNT_LOGIN="${UMN_ACCOUNT_LOGIN:-$GITHUB_REPOSITORY_OWNER}"
+        UMN_ACTOR_LOGIN="${UMN_ACTOR_LOGIN:-$GITHUB_ACTOR}"
+        UMN_ACTOR_ID="${UMN_ACTOR_ID:-$GITHUB_ACTOR_ID}"
+        UMN_REPOSITORY="${UMN_REPOSITORY:-$GITHUB_REPOSITORY}"
+        UMN_REPOSITORY_ID="${UMN_REPOSITORY_ID:-$GITHUB_REPOSITORY_ID}"
         if [ -z "$UMN_ACCOUNT_ID" ]; then
           OWNER_JSON="$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/users/$UMN_ACCOUNT_LOGIN" || curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/orgs/$UMN_ACCOUNT_LOGIN")"
           UMN_ACCOUNT_ID="$(printf '%s' "$OWNER_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
