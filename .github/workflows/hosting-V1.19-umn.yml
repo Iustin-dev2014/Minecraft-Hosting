@@ -145,55 +145,6 @@ jobs:
       run: |
         echo "::warning::UMN Tailscale OIDC is not configured. Minecraft will continue, but this run cannot register with UMN. See the Admin repository TAILSCALE-SETUP.md."
 
-    - name: Install and start automatic Minecraft TCP tunnel (Bore)
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p logs runtime
-        BORE_VERSION="v0.6.0"
-        BORE_URL="https://github.com/ekzhang/bore/releases/download/${BORE_VERSION}/bore-${BORE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-        curl -fL --retry 3 --retry-delay 2 "$BORE_URL" -o /tmp/bore.tar.gz
-        echo "e484d1e3acba77169b773f31a5bfb34192d4b660f44a094a658a2522cd2270f7  /tmp/bore.tar.gz" | sha256sum --check
-        mkdir -p /tmp/bore-unpack
-        tar -xzf /tmp/bore.tar.gz -C /tmp/bore-unpack
-        BORE_BIN="$(find /tmp/bore-unpack -type f -name bore -print -quit)"
-        if [ -z "$BORE_BIN" ]; then
-          echo "The official Bore release did not contain the expected executable."
-          find /tmp/bore-unpack -maxdepth 3 -type f -print
-          exit 1
-        fi
-        install -m 0755 "$BORE_BIN" ./bore
-        ./bore --version
-
-        # Expose the Minecraft Java TCP port through the public Bore relay.
-        nohup ./bore local 25565 --to bore.pub > logs/bore.log 2>&1 &
-        echo $! > runtime/bore.pid
-
-        ADDRESS=""
-        for i in $(seq 1 60); do
-          ADDRESS="$(grep -Eo 'bore\.pub:[0-9]+' logs/bore.log | tail -n 1 || true)"
-          if [ -n "$ADDRESS" ]; then break; fi
-          if ! kill -0 "$(cat runtime/bore.pid)" 2>/dev/null; then
-            echo "Bore exited before publishing the Minecraft address."
-            cat logs/bore.log
-            exit 1
-          fi
-          sleep 2
-        done
-        if [ -z "$ADDRESS" ]; then
-          echo "Bore did not publish a TCP address within 120 seconds."
-          cat logs/bore.log
-          exit 1
-        fi
-
-        echo "============================================================"
-        echo "MINECRAFT JAVA SERVER ADDRESS: $ADDRESS"
-        echo "MINECRAFT_ADDRESS=$ADDRESS" >> "$GITHUB_ENV"
-        printf "%s\n" "$ADDRESS" > runtime/minecraft-address.txt
-        echo "LOCAL TARGET: 127.0.0.1:25565"
-        echo "TUNNEL: Bore TCP relay (no account, token, or manual claim)"
-        echo "The public port is temporary and changes on each workflow run."
-        echo "============================================================"
     - name: UMN - Register instance and keep background heartbeat active
       if: ${{ (inputs.tailscale_client_id || vars.UMN_TS_INSTANCE_CLIENT_ID) != '' && (inputs.tailscale_audience || vars.UMN_TS_INSTANCE_AUDIENCE) != '' }}
       shell: bash
@@ -346,6 +297,55 @@ jobs:
         echo "[UMN] Background registration retries are active (every 20 seconds)."
         echo "============================================================"
 
+    - name: Install and start automatic Minecraft TCP tunnel (Bore)
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p logs runtime
+        BORE_VERSION="v0.6.0"
+        BORE_URL="https://github.com/ekzhang/bore/releases/download/${BORE_VERSION}/bore-${BORE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+        curl -fL --retry 3 --retry-delay 2 "$BORE_URL" -o /tmp/bore.tar.gz
+        echo "e484d1e3acba77169b773f31a5bfb34192d4b660f44a094a658a2522cd2270f7  /tmp/bore.tar.gz" | sha256sum --check
+        mkdir -p /tmp/bore-unpack
+        tar -xzf /tmp/bore.tar.gz -C /tmp/bore-unpack
+        BORE_BIN="$(find /tmp/bore-unpack -type f -name bore -print -quit)"
+        if [ -z "$BORE_BIN" ]; then
+          echo "The official Bore release did not contain the expected executable."
+          find /tmp/bore-unpack -maxdepth 3 -type f -print
+          exit 1
+        fi
+        install -m 0755 "$BORE_BIN" ./bore
+        ./bore --version
+
+        # Expose the Minecraft Java TCP port through the public Bore relay.
+        nohup ./bore local 25565 --to bore.pub > logs/bore.log 2>&1 &
+        echo $! > runtime/bore.pid
+
+        ADDRESS=""
+        for i in $(seq 1 60); do
+          ADDRESS="$(grep -Eo 'bore\.pub:[0-9]+' logs/bore.log | tail -n 1 || true)"
+          if [ -n "$ADDRESS" ]; then break; fi
+          if ! kill -0 "$(cat runtime/bore.pid)" 2>/dev/null; then
+            echo "Bore exited before publishing the Minecraft address."
+            cat logs/bore.log
+            exit 1
+          fi
+          sleep 2
+        done
+        if [ -z "$ADDRESS" ]; then
+          echo "Bore did not publish a TCP address within 120 seconds."
+          cat logs/bore.log
+          exit 1
+        fi
+
+        echo "============================================================"
+        echo "MINECRAFT JAVA SERVER ADDRESS: $ADDRESS"
+        echo "MINECRAFT_ADDRESS=$ADDRESS" >> "$GITHUB_ENV"
+        printf "%s\n" "$ADDRESS" > runtime/minecraft-address.txt
+        echo "LOCAL TARGET: 127.0.0.1:25565"
+        echo "TUNNEL: Bore TCP relay (no account, token, or manual claim)"
+        echo "The public port is temporary and changes on each workflow run."
+        echo "============================================================"
     - name: Restore directories
       run: |
         mkdir -p server-data backups logs runtime
